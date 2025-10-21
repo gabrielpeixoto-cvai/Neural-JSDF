@@ -33,10 +33,17 @@ from sdf.robot_sdf import RobotSdfCollisionNet
 
 
 def run_sdf():
-    device = torch.device('cpu', 0)
-    tensor_args = {'device': device, 'dtype': torch.float32}
-    data = loadmat('../data-sampling/datasets/data_mesh_test.mat')['dataset']
-
+    device = torch.device("cpu", 0)
+    tensor_args = {"device": device, "dtype": torch.float32}
+    # data = loadmat('../data-sampling/datasets/data_mesh_test.mat')['dataset']
+    try:
+        # Load the dataset saved by gen_dataset.py
+        data = np.load("../data-sampling/robot_dataset.npy")
+    except FileNotFoundError:
+        print(
+            "Error: 'robot_dataset.npy' not found. Ensure gen_dataset.py was run and saved the file."
+        )
+        raise
 
     x = torch.Tensor(data[:1000, 0:10]).to(**tensor_args)
     y = 100 * torch.Tensor(data[:1000, 10:]).to(**tensor_args)
@@ -44,16 +51,18 @@ def run_sdf():
     print(y.shape)
 
     dof = x.shape[1]
-    print('Input vector shape', x.shape)
+    print("Input vector shape", x.shape)
     s = 256
     n_layers = 5
     skips = []
-    fname = 'sdf_%dx%d_mesh.pt'%(s,n_layers)
+    fname = "sdf_%dx%d_mesh.pt" % (s, n_layers)
     if skips == []:
-        n_layers-=1
-    nn_model = RobotSdfCollisionNet(in_channels=dof, out_channels=y.shape[1], layers=[s] * n_layers, skips=skips)
-    #nn_model.load_weights('sdf_256x5_mesh.pt', tensor_args)
-    nn_model.load_weights('franka_collision_model.pt', tensor_args)
+        n_layers -= 1
+    nn_model = RobotSdfCollisionNet(
+        in_channels=dof, out_channels=y.shape[1], layers=[s] * n_layers, skips=skips
+    )
+    # nn_model.load_weights('sdf_256x5_mesh.pt', tensor_args)
+    nn_model.load_weights("franka_collision_model.pt", tensor_args)
 
     nn_model.model.to(**tensor_args)
 
@@ -68,22 +77,28 @@ def run_sdf():
     mean_y = torch.mean(y, dim=0) * 0.0
     std_y = torch.std(y, dim=0) * 0.0 + 1.0
 
-
     # print(x.shape)
     t0 = time.time()
     for i in range(1000):
         y_pred = model.forward(x)
     t1 = time.time()
     print("Time: %f" % (t1 - t0))
-    print('Average time for one forward pass (microseconds): %f' % (1e6*(t1 - t0) / 1000))
-    print('Average time per sample (microseconds): %f' % (1e6*(t1 - t0) / 1000 / x.shape[0]))
+    print(
+        "Average time for one forward pass (microseconds): %f"
+        % (1e6 * (t1 - t0) / 1000)
+    )
+    print(
+        "Average time per sample (microseconds): %f"
+        % (1e6 * (t1 - t0) / 1000 / x.shape[0])
+    )
     y_pred = torch.mul(y_pred, std_y) + mean_y
     y_test = torch.mul(y, std_y) + mean_y
     # print(y_pred.shape, y_test.shape)
-    loss = F.l1_loss(y_pred, y_test, reduction='mean')
+    loss = F.l1_loss(y_pred, y_test, reduction="mean")
     print(torch.median(y_pred), torch.mean(y_pred))
     print(loss.item())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_sdf()
+
