@@ -44,8 +44,8 @@ if __name__ == "__main__":
 
     # 2. Dataset Configuration
     N_MESHES = len(mesh) - 2  # Assuming only the first N-2 meshes are for collision
-    N_JPOS = 10  # Number of joint positions to sample
-    # N_JPOS = 5000  # Uncomment for the value used in the paper
+    # N_JPOS = 10  # Number of joint positions to sample
+    N_JPOS = 5000  # Uncomment for the value used in the paper
 
     # Points per mesh per type (from genDataset.m)
     N_INSIDE = np.full(N_MESHES, 25)
