@@ -56,10 +56,21 @@ def point_to_mesh_signed_distance(faces, vertices, query_points):
     # Create the Trimesh object
     mesh = trimesh.Trimesh(vertices=vertices_unwrapped, faces=faces_0_indexed)
 
+    mesh.fix_normals()
+
+    # --- ROBUSTNESS CHECK ---
+    # Signed distance is only truly accurate for watertight meshes.
+    # We can still run it, but it's good to know if the mesh has holes.
+    if not mesh.is_watertight:
+        print(
+            f"  WARNING: Mesh is not watertight. Signed distance results may be inaccurate."
+        )
+    # ----------------------
+
     # Calculate signed distance
     signed_distances = trimesh.proximity.signed_distance(mesh, query_points)
 
-    return signed_distances
+    return signed_distances, mesh
 
 
 # --- Main Point Generation Script ---
@@ -67,7 +78,7 @@ def point_to_mesh_signed_distance(faces, vertices, query_points):
 
 def generate_link_points(
     input_mat_path="mesh_light.mat",
-    output_mat_path="mesh_light_pts_py.mat",
+    output_mat_path="mesh_light_pts.npz",
 ):
     """
     Converts MATLAB linkPtsGen.m to Python. Generates interior and close-to-surface
@@ -77,7 +88,7 @@ def generate_link_points(
     # Setup parameters from MATLAB file
     N_MESHES = 11
     N_SAMPLE_PTS = 10000
-    BBOX_SCALE_FACTOR = 0.2
+    BBOX_SCALE_FACTOR = 0.02
     CLOSE_DISTANCE_THRESHOLD = 0.03
 
     print(f"Loading meshes from: {input_mat_path}")
@@ -93,8 +104,8 @@ def generate_link_points(
         )
         return
 
-    # List to store the new, mutable mesh structures (dictionaries)
-    enhanced_mesh_list = []
+    # Dictionary to store all arrays for saving
+    data_to_save = {}
 
     # 2. Iterate through all 11 meshes and generate points
     for j in range(N_MESHES):
@@ -123,45 +134,59 @@ def generate_link_points(
 
         # In Python, this is replaced by one Trimesh call:
         # Negative for inside, positive for outside
-        signed_distances = point_to_mesh_signed_distance(F, V, pts_all)
-
+        signed_distances, trimesh_mesh = point_to_mesh_signed_distance(F, V, pts_all)
+        points_inside = trimesh_mesh.contains(pts_all)
+        # print(points_inside)
         # 3. Filter and store 'int_pts' and 'close_pts'
 
         # Interior points: dst2 < 0
-        lbl_inside = signed_distances < 0
+        signed_distances_abs = abs(signed_distances)
+        # print(signed_distances.shape)
+        # print(signed_distances)
+        # print(signed_distances_abs.shape)
+        # print(signed_distances_abs)
+        # print(pts_all.shape)
+        signed_distances_abs[np.where(points_inside)] = (
+            -1 * signed_distances_abs[np.where(points_inside)]
+        )
+        # print(signed_distances_abs[np.where(points_inside)])
+        lbl_inside = np.where(signed_distances_abs < 0)[0]
+        # print(lbl_inside)
+        # print(signed_distances)
         int_pts = pts_all[lbl_inside, :]
 
         # Close points: dst2 > 0 AND dst2 < 0.03
         # The original MATLAB snippet used dst2>0 & dst2<0.03
-        lbl_close = (signed_distances > 0) & (
-            signed_distances < CLOSE_DISTANCE_THRESHOLD
-        )
+        lbl_close = np.where(
+            (signed_distances_abs > 0)
+            & (signed_distances_abs < CLOSE_DISTANCE_THRESHOLD)
+        )[0]
+        # print(lbl_close)
         close_pts = pts_all[lbl_close, :]
 
-        # 4. Update the mesh data structure
-        # NOTE: We convert the NumPy array back into the nested structure
-        # that scipy.io.loadmat expects for saving a structure field containing an array.
+        # 4. Store all data for this mesh in the output dictionary
+        # We use a prefix for each mesh (e.g., "mesh_0_", "mesh_1_")
+        prefix = f"mesh_{j}_"
 
-        # Fixed: Get names from the structured dtype of the first element
+        # Store new points
+        data_to_save[prefix + "int_pts"] = int_pts
+        data_to_save[prefix + "close_pts"] = close_pts
+
+        # Store original fields (unwrapping them from MATLAB's structure)
         field_names = mesh_data[0].dtype.names
+        for name in field_names:
+            original_data = mesh_data[j][name]
+            unwrapped_data = original_data
 
-        # mesh_data[j] = mesh_data[j].item()  # Convert to dict-like for easy modification
-        # Convert the immutable NumPy record (mesh_data[j]) to a mutable Python dictionary
-        mesh_dict = {name: mesh_data[j][name] for name in field_names}
+            # Proactively unwrap data if it matches the V/F (1,1) object array structure
+            if (
+                isinstance(original_data, np.ndarray)
+                and original_data.dtype == "object"
+                and original_data.shape == (1, 1)
+            ):
+                unwrapped_data = original_data[0][0]
 
-        # Store the points in a nested structure [array([pts])] to match the
-        # typical format when loading back into MATLAB/scipy.io
-        # mesh_dict["int_pts"] = np.array([int_pts], dtype=object)
-        # mesh_dict["close_pts"] = np.array([close_pts], dtype=object)
-        mesh_dict["int_pts"] = np.array(
-            [np.array([int_pts], dtype=object)], dtype=object
-        )
-        mesh_dict["close_pts"] = np.array(
-            [np.array([close_pts], dtype=object)], dtype=object
-        )
-
-        # Append the new mutable dictionary to the list
-        enhanced_mesh_list.append(mesh_dict)
+            data_to_save[prefix + name] = unwrapped_data
 
         print(
             f"  -> Generated {int_pts.shape[0]} interior and {close_pts.shape[0]} close points."
@@ -170,8 +195,13 @@ def generate_link_points(
     # 3. Save the enhanced mesh data structure
     print(f"\nSaving enhanced mesh data to: {output_mat_path}")
 
-    # Package the data back into a structure/array that mimics the MATLAB cell array format
-    sio.savemat(output_mat_path, {"mesh": enhanced_mesh_list})
+    # Use np.savez_compressed to save the dictionary as a .npz file
+    # The **data_to_save unpacks the dictionary into keyword arguments
+    try:
+        np.savez_compressed(output_mat_path, **data_to_save)
+        print("Point generation and saving complete.")
+    except Exception as e:
+        print(f"ERROR: Failed to save .npz file: {e}")
 
     print("Point generation and saving complete.")
 
