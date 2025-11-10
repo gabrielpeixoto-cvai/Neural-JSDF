@@ -32,6 +32,20 @@ import matplotlib.pyplot as plt
 from sdf.robot_sdf import RobotSdfCollisionNet
 
 
+# NEW: Add Dataset class (as shown above)
+class RobotSDFDataset(torch.utils.data.Dataset):
+    # ... (definition as shown above)
+    def __init__(self, x_data, y_data):
+        self.x = x_data
+        self.y = y_data
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx]
+
+
 def create_dataset(robot_name):
     device = torch.device("cuda", 0)
     tensor_args = {"device": device, "dtype": torch.float32}
@@ -62,19 +76,27 @@ def create_dataset(robot_name):
     idx_val = np.arange(idx_train[-1] + 1, int(n_size * (train_ratio + test_ratio)))
     idx_test = np.arange(idx_val[-1] + 1, int(n_size))
 
-    x = torch.Tensor(data[L1:L2, 0:10]).to(device, dtype=torch.float16)
-    y = 100 * torch.Tensor(data[L1:L2, 10:]).to(device, dtype=torch.float16)
+    # x = torch.Tensor(data[L1:L2, 0:10]).to(device, dtype=torch.float16)
+    # y = 100 * torch.Tensor(data[L1:L2, 10:]).to(device, dtype=torch.float16)
+    # --- MODIFIED: Load data as full-precision CPU tensors (or NumPy arrays) ---
+    # We will use float32 now, and switch to float16 inside the loop for AMP.
+    # The original script used float16 immediately, which is less common for the full dataset.
+    x_full = torch.Tensor(data[L1:L2, 0:10])  # Keep on CPU for now
+    y_full = 100 * torch.Tensor(data[L1:L2, 10:])  # Keep on CPU for now
     # y[y<0]*=5
     # y[y==0] = 1
-    dof = x.shape[1]
+    dof = x_full.shape[1]
     s = 256
     n_layers = 5
     skips = []
-    fname = "sdf_%dx%d_mesh.pt" % (s, n_layers)
+    fname = "sdf_%dx%d_mesh_py.pt" % (s, n_layers)
     if skips == []:
         n_layers -= 1
     nn_model = RobotSdfCollisionNet(
-        in_channels=dof, out_channels=y.shape[1], layers=[s] * n_layers, skips=skips
+        in_channels=dof,
+        out_channels=y_full.shape[1],
+        layers=[s] * n_layers,
+        skips=skips,
     )
     # nn_model.load_weights('../scripts/sdf_convex_256x5_mesh.pt', tensor_args)
     # nn_model.load_weights('../scripts/gridsearch/5_sdf_convex_512x5.pt', tensor_args)
@@ -86,8 +108,11 @@ def create_dataset(robot_name):
     nelem = sum([param.nelement() for param in model.parameters()])
     print(repr(model))
     print("Sum of parameters:%d" % nelem)
+    # --- MODIFIED: Create Dataset and DataLoader instances ---
+    BATCH_SIZE = 409600  # Adjust this value based on your GPU memory
     # time.sleep(2)
     # load training set:
+    """
     x_train = x[idx_train, :]
     y_train = y[idx_train, :]
     y_train_labels = y[idx_train, :]
@@ -108,6 +133,48 @@ def create_dataset(robot_name):
     y_val = y[idx_val, :]
     x_test = x[idx_test, :]
     y_test = y[idx_test, :]
+    """
+
+    # Slice the full tensors on the CPU
+    x_train_cpu = x_full[idx_train, :]
+    y_train_cpu = y_full[idx_train, :]
+    x_val_cpu = x_full[idx_val, :]
+    y_val_cpu = y_full[idx_val, :]
+    # x_test is not used in the training loop, so we can ignore it for batching.
+    # scale dataset: (disabled because of nerf features!)
+    mean_x = torch.mean(x_full, dim=0) * 0.0
+    std_x = torch.std(x_full, dim=0) * 0.0 + 1.0
+    mean_y = torch.mean(y_full, dim=0) * 0.0
+    std_y = torch.std(y_full, dim=0) * 0.0 + 1.0
+
+    # Create the Dataset objects
+    train_dataset = RobotSDFDataset(x_train_cpu, y_train_cpu)
+    val_dataset = RobotSDFDataset(x_val_cpu, y_val_cpu)
+
+    # Create the DataLoader objects
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=4,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        pin_memory=True,
+        num_workers=2,
+    )
+
+    # Pre-calculate indices for close points on the CPU
+    y_train_labels = y_train_cpu
+    y_train_labels[y_train_labels <= 0] = -1
+    y_train_labels[y_train_labels > 0] = 1
+
+    y_val_labels = y_val_cpu
+    y_val_labels[y_val_labels <= 0] = -1
+    y_val_labels[y_val_labels > 0] = 1
 
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-3)
 
@@ -129,14 +196,15 @@ def create_dataset(robot_name):
     # training:
     e_notsaved = 0
     scaler = torch.cuda.amp.GradScaler(enabled=True)
-    idx_close_train = y_train[:, -1] < 10
-    idx_close_val = y_val[:, -1] < 10
+    idx_close_train = y_train_cpu[:, -1] < 10
+    idx_close_val = y_val_cpu[:, -1] < 10
 
     for e in range(epochs):
         t0 = time.time()
         model.train()
         loss = []
         i = 0
+        """
         with torch.cuda.amp.autocast():
             y_pred_train = model.forward(x_train)
             train_loss = F.mse_loss(y_pred_train, y_train, reduction="mean")
@@ -146,8 +214,31 @@ def create_dataset(robot_name):
         scaler.update()
         optimizer.zero_grad()
         loss.append(train_loss.item())
+        """
+
+        # --- NEW/MODIFIED: Iterate over the DataLoader for Training ---
+        for i, (x_batch, y_batch) in enumerate(train_loader):
+            # Move batch data to GPU and convert to float16 for AMP
+            x_batch = x_batch.to(device, dtype=torch.float16)
+            y_batch = y_batch.to(device, dtype=torch.float16)
+
+            with torch.cuda.amp.autocast():
+                y_pred_train = model.forward(x_batch)
+                train_loss_batch = F.mse_loss(y_pred_train, y_batch, reduction="mean")
+
+            scaler.scale(train_loss_batch).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            loss.append(train_loss_batch.item())
+
+        train_loss = np.mean(loss)  # Use the average loss over all batches
+        # ----------------------------------------------------------------------
 
         model.eval()
+        val_loss_list = []
+        ee_loss_close_list = []
+        """
         with torch.cuda.amp.autocast():
             y_pred = model.forward(x_val)
             val_loss = F.mse_loss(y_pred, y_val, reduction="mean")
@@ -156,6 +247,31 @@ def create_dataset(robot_name):
                 y_val[idx_close_val][:, -1],
                 reduction="mean",
             )
+        """
+        # --- NEW/MODIFIED: Iterate over the DataLoader for Validation ---
+        for x_val_batch, y_val_batch in val_loader:
+            # Move batch data to GPU and convert to float16 for AMP
+            x_val_batch = x_val_batch.to(device, dtype=torch.float16)
+            y_val_batch = y_val_batch.to(device, dtype=torch.float16)
+
+            with torch.cuda.amp.autocast():
+                y_pred = model.forward(x_val_batch)
+                val_loss_batch = F.mse_loss(y_pred, y_val_batch, reduction="mean")
+
+                # Calculate loss for close points
+                idx_close_val_batch = y_val_batch[:, -1] < 10
+                ee_loss_close_batch = F.l1_loss(
+                    y_pred[idx_close_val_batch][:, -1],
+                    y_val_batch[idx_close_val_batch][:, -1],
+                    reduction="mean",
+                )
+
+            val_loss_list.append(val_loss_batch.item())
+            ee_loss_close_list.append(ee_loss_close_batch.item())
+
+        val_loss = torch.tensor(val_loss_list).mean()  # Average val loss
+        ee_loss_close = torch.tensor(ee_loss_close_list).mean()  # Average close loss
+        # ----------------------------------------------------------------------
         if e == 0:
             min_loss = val_loss
         scheduler.step(val_loss)
@@ -179,7 +295,7 @@ def create_dataset(robot_name):
             #'sdf_convex_256_mlp_nerf_skip.pt')
             min_loss = val_loss
             print(y_pred[0, :])
-            print(y_val[0, :])
+            print(y_val_batch[0, :])
             # if e > 1500:
             #     break
         print(
@@ -214,4 +330,3 @@ def create_dataset(robot_name):
 
 if __name__ == "__main__":
     create_dataset("franka")
-
