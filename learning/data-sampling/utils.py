@@ -83,10 +83,10 @@ def meshes_fk(mesh_data, base, joint_state):
         T_link = P[i]
         R_link = T_link[:3, :3]
         t_link = T_link[:3, 3]
-        print(f"Rlink: {R_link}")
-        print(f"tlink: {t_link}")
-        print(f"mesh data v {mesh_data[i]['v']} ")
-        print(f"P: {len(P)} meshdata: {len(mesh_data)}")
+        # print(f"Rlink: {R_link}")
+        # print(f"tlink: {t_link}")
+        # print(f"mesh data v {mesh_data[i]['v']} ")
+        # print(f"P: {len(P)} meshdata: {len(mesh_data)}")
 
         # Transform vertices: V' = V * R_link^T + t_link^T
         # (Equivalent to MATLAB: V' = mesh{i}.v * R' + T')
@@ -110,7 +110,10 @@ def meshes_fk(mesh_data, base, joint_state):
     # The finger motion is controlled by the 8th joint state (index 7).
     # MATLAB: T(1:3,4) = [0 joint_state(8) 0.065]'
     # In Python: j_state[7] is the 8th element (index 7)
-    finger_joint = joint_state[7]
+    if joint_state.shape[0] < 8:
+        finger_joint = 0
+    else:
+        finger_joint = joint_state[7]
 
     # 2a. Finger 1 (mesh_data[9], index i=9)
     # T_f1 is the offset transform for the first finger relative to the Hand.
@@ -229,4 +232,4 @@ def point_to_mesh_signed_distance(faces, vertices, query_points):
     # Calculate signed distance: Negative for inside, positive for outside
     signed_distances = trimesh.proximity.signed_distance(mesh, query_points)
 
-    return signed_distances
+    return signed_distances, mesh

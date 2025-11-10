@@ -22,7 +22,7 @@ if __name__ == "__main__":
         mesh = mat_contents["mesh"][0]
     except FileNotFoundError:
         print(
-            "ERROR: Could not find 'meshes/mesh_light_pts.mat'. Please check file path."
+            "ERROR: Could not find 'meshes/mesh_light_pts_py.mat'. Please check file path."
         )
         exit()
 
@@ -45,7 +45,7 @@ if __name__ == "__main__":
     # 2. Dataset Configuration
     N_MESHES = len(mesh) - 2  # Assuming only the first N-2 meshes are for collision
     # N_JPOS = 10  # Number of joint positions to sample
-    N_JPOS = 5000  # Uncomment for the value used in the paper
+    N_JPOS = 100  # Uncomment for the value used in the paper
 
     # Points per mesh per type (from genDataset.m)
     N_INSIDE = np.full(N_MESHES, 25)
@@ -133,9 +133,18 @@ if __name__ == "__main__":
             F = mesh_fk[j]["F"]
 
             # point_to_mesh_signed_distance handles the 1-indexing conversion internally
-            signed_distances = point_to_mesh_signed_distance(F, V, pts_all)
+            signed_distances, trimesh_mesh = point_to_mesh_signed_distance(
+                F, V, pts_all
+            )
+            # necessary to handle non-watertight meshes
+            points_inside = trimesh_mesh.contains(pts_all)
+            signed_distances_abs = abs(signed_distances)
+            signed_distances_abs[np.where(points_inside)] = (
+                -1 * signed_distances_abs[np.where(points_inside)]
+            )
+            lbl_inside = np.where(signed_distances_abs < 0)[0]
 
-            dist_arr[:, j] = signed_distances
+            dist_arr[:, j] = signed_distances_abs
         #
 
         # 5. Create and Store Dataset Entry
@@ -150,7 +159,7 @@ if __name__ == "__main__":
     final_dataset = np.vstack(all_data)
 
     # Save the dataset to a file (e.g., NumPy .npy or CSV)
-    np.save("robot_dataset.npy", final_dataset)
+    np.save("robot_dataset_py.npy", final_dataset)
     # np.savetxt('robot_dataset.csv', final_dataset, delimiter=',')
 
     print(f"\nDataset generation complete. Total samples: {final_dataset.shape[0]}")
