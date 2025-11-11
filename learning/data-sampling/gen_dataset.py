@@ -1,4 +1,5 @@
 import numpy as np
+from tqdm import tqdm
 import scipy.io as sio  # For loading .mat files
 from utils import (
     get_bbox,
@@ -44,8 +45,8 @@ if __name__ == "__main__":
 
     # 2. Dataset Configuration
     N_MESHES = len(mesh) - 2  # Assuming only the first N-2 meshes are for collision
-    # N_JPOS = 10  # Number of joint positions to sample
-    N_JPOS = 100  # Uncomment for the value used in the paper
+    N_JPOS = 10  # Number of joint positions to sample
+    # N_JPOS = 5000  # Uncomment for the value used in the paper
 
     # Points per mesh per type (from genDataset.m)
     N_INSIDE = np.full(N_MESHES, 25)
@@ -62,8 +63,8 @@ if __name__ == "__main__":
     all_data = []
 
     # 3. Main Data Generation Loop
-    for i in range(N_JPOS):
-        print(f"Generating data for joint position {i+1}/{N_JPOS}...")
+    for i in tqdm(range(N_JPOS)):
+        # print(f"Generating data for joint position {i+1}/{N_JPOS}...")
 
         # Sample a random joint position (q)
         q_rand = q_min + np.random.rand(1, len(q_min)) * (q_max - q_min)
@@ -130,7 +131,7 @@ if __name__ == "__main__":
         # Python uses trimesh.proximity.signed_distance for a single, robust call.
         for j in range(N_MESHES):
             V = mesh_fk[j]["V"]
-            F = mesh_fk[j]["F"]
+            F = mesh_fk[j]["F"] - 1
 
             # point_to_mesh_signed_distance handles the 1-indexing conversion internally
             signed_distances, trimesh_mesh = point_to_mesh_signed_distance(
@@ -159,7 +160,7 @@ if __name__ == "__main__":
     final_dataset = np.vstack(all_data)
 
     # Save the dataset to a file (e.g., NumPy .npy or CSV)
-    np.save("robot_dataset_py.npy", final_dataset)
+    np.save(f"robot_dataset_py_{N_JPOS}.npy", final_dataset)
     # np.savetxt('robot_dataset.csv', final_dataset, delimiter=',')
 
     print(f"\nDataset generation complete. Total samples: {final_dataset.shape[0]}")

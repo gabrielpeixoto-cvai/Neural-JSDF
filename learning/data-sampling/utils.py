@@ -224,7 +224,7 @@ def point_to_mesh_signed_distance(faces, vertices, query_points):
                         Negative for inside, positive for outside.
     """
     # Faces are 1-indexed in MATLAB, convert to 0-indexed for Trimesh
-    faces_0_indexed = faces - 1
+    faces_0_indexed = faces
 
     # Create the Trimesh object
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces_0_indexed)
