@@ -59,7 +59,7 @@ NETWORK_SKIPS = []
 OUTPUT_CHANNELS = 9  # Example: Assuming 7 links for a typical robot. ADJUST THIS!
 
 # Define the path to your trained model weights (taken from run_sdf.py)
-MODEL_WEIGHTS_PATH = "sdf_256x5_mesh_py.pt"
+MODEL_WEIGHTS_PATH = "sdf_256x5_mesh.pt"
 # Define the path to your ground-truth mesh data
 MESH_DATA_PATH = "../data-sampling/meshes/mesh_light_pts.mat"
 
