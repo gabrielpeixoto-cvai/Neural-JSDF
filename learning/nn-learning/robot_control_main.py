@@ -123,6 +123,9 @@ def motion_planning_main():
         # 3. Initialize the Motion Planner
         motion_planner = MotionPlannerOMPL(planner_type=PLANNER_TYPE)
         motion_planner.setup_planner(robot_planner)
+        # 4. Setup Off-screen Rendering for Camera
+        # Use a small resolution for faster capture in the demo
+        robot_planner.setup_offscreen_rendering(width=320, height=240)
 
     except Exception as e:
         print(f"❌ Initialization Error: {e}")
@@ -158,8 +161,50 @@ def motion_planning_main():
         if trajectory is not None:
             # Play the planned path over 8 seconds total duration
             robot_planner.play_trajectory(trajectory, duration=8.0)
+            print("trajectory doen")
     else:
         print("Cannot play trajectory: Planning failed.")
+
+    # --- 7. Sensing and Point Cloud Visualization (Feature 2 & 3) ---
+
+    # Reset to an intermediate pose (or the end pose) to capture the scene
+    if success and trajectory is not None:
+        reset_q = trajectory[-1]  # Reset to the end of the planned path
+    else:
+        reset_q = robot_planner.data.qpos.copy()  # Stay at current Q
+
+    robot_planner.set_joint_positions(reset_q)
+    mj.mj_forward(robot_planner.model, robot_planner.data)
+
+    print("\n--- Phase 3: Camera Sensing and Point Cloud Visualization ---")
+
+    # Capture Point Cloud
+    point_cloud_xyz = robot_planner.capture_point_cloud()
+
+    if point_cloud_xyz is not None and point_cloud_xyz.size > 0:
+
+        # Visualize the Point Cloud using remaining markers (Feature 3)
+        # Use blue markers for the point cloud
+        robot_planner.visualize_geoms(point_cloud_xyz, rgba=np.array([0, 0, 1, 1]))
+
+        # Launch the passive viewer again to see the static point cloud markers
+        print("Launching viewer to display static point cloud markers (blue spheres).")
+        with mj.viewer.launch_passive(
+            robot_planner.model, robot_planner.data
+        ) as viewer:
+            while viewer.is_running():
+                # Display the markers
+                viewer.sync()
+                time.sleep(0.01)
+
+        # Disable markers after the point cloud viewer closes
+        robot_planner.disable_markers()
+        mj.mj_forward(robot_planner.model, robot_planner.data)
+    else:
+        print("Point cloud capture failed or returned no valid points.")
+
+    # 8. Release resources
+    robot_planner.release_offscreen_rendering()
 
 
 if __name__ == "__main__":

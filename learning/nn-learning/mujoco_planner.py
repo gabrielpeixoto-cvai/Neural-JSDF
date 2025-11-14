@@ -22,6 +22,10 @@ class RobotPlanner:
     state access, Inverse Kinematics (IK), and collision detection.
     """
 
+    NUM_VIZ_MARKERS = 1000
+    CAMERA_NAME = "eef_camera"
+    MARKER_PREFIX = "viz_marker_"
+
     def __init__(self, mjcf_path: str, end_effector_site_name: str):
         """
         1. Loads the robot model using mjspec from an MJCF file.
@@ -29,6 +33,11 @@ class RobotPlanner:
         """
         # Load MJCF into MjSpec for programmatic editing
         self.spec = MjSpec.from_file(mjcf_path)
+        self.end_effector_site_name = end_effector_site_name
+
+        self._add_viz_geoms_to_spec()
+        self._add_camera_to_spec()
+        self._add_obstacles_to_spec()
 
         # Compile the spec into mjModel and create MjData
         self.model = self.spec.compile()
@@ -40,11 +49,10 @@ class RobotPlanner:
             )  # Get body name (optional)
             mass = self.model.body_mass[body_id]
             inertia = self.model.body_inertia[body_id]
+            group = self.model.body
             print(
                 f"Body {body_id} (Name: {body_name}): Mass = {mass}, Inertia = {inertia}"
             )
-
-        self.end_effector_site_name = end_effector_site_name
 
         # Get the ID for the end-effector site
         self.eef_site_id = mj_name2id(
@@ -54,6 +62,14 @@ class RobotPlanner:
         if self.eef_site_id == -1:
             raise ValueError(f"Site '{end_effector_site_name}' not found in model.")
 
+        # --- Sensing and Visualization IDs ---
+        self.camera_id = mj_name2id(
+            self.model, mj.mjtObj.mjOBJ_CAMERA, self.CAMERA_NAME
+        )
+
+        print(f"CAMERAID : {self.camera_id}")
+        self.marker_body_ids, self.marker_geom_ids = self._get_marker_ids()
+
         # --- Joint Identification ---
         # For geometric planning, we plan over all DOFs (model.nq)
         self.num_dofs = self.model.nq
@@ -61,6 +77,126 @@ class RobotPlanner:
         print(f"RobotPlanner initialized. Planning DOFs (nq): {self.num_dofs}")
         # Call forward once to initialize all data structures
         mj.mj_forward(self.model, self.data)
+
+        # Off-screen rendering context variables
+        self.renderer = None
+        self.offscreen_context = None
+        print(self.marker_body_ids)
+
+        # Initialize Mocap Quaternions for visualization bodies
+        # MOCAP geoms are placed inside a MOCAP body, the body's orientation is controlled here.
+        for body_id in self.marker_body_ids:
+            mocap_slot = self.model.body_mocapid[body_id]
+            if mocap_slot != -1:
+                # Set identity quaternion for all visualization markers
+                self.data.mocap_quat[mocap_slot] = [1.0, 0.0, 0.0, 0.0]
+
+    def _add_viz_geoms_to_spec(self):
+        """Programmatically adds MOCAP bodies and their geoms to the worldbody."""
+        for i in range(self.NUM_VIZ_MARKERS):
+            body_name = f"{self.MARKER_PREFIX}{i}"
+
+            # Create a mocap body in the worldbody
+            mocap_body = self.spec.worldbody.add_body(
+                name=body_name,
+                pos=[-1, -1, -1],
+                mocap=True,  # Critical for dynamic positioning via data.mocap_pos
+            )
+
+            # Add a visualization geom to the mocap body
+            mocap_body.add_geom(
+                name=f"geom_{body_name}",  # Geom must have a unique name
+                type=mj.mjtGeom.mjGEOM_SPHERE,
+                size=[0.01, 0.01, 0.01],  # Small sphere size
+                pos=[0, 0, 0],
+                rgba=[0, 1, 0, 1.0],  # Start invisible (alpha 0.0)
+                group=3,
+            )
+        print(
+            f"Added {self.NUM_VIZ_MARKERS} visualization MOCAP bodies programmatically."
+        )
+
+    def _add_obstacles_to_spec(self):
+        """Programmatically adds MOCAP bodies and their geoms to the worldbody."""
+        positions = [[-1, 0, 0.5], [1, 0, 0.5], [0, -1, 0.5], [0, 1, 0.5]]
+        sizes = [[0.02, 1, 0.5], [0.02, 1, 0.5], [1, 0.02, 0.5], [1, 0.02, 0.5]]
+        for i in range(4):
+            body_name = f"obstacle_{i}"
+
+            # Create a mocap body in the worldbody
+            obstacle_body = self.spec.worldbody.add_body(
+                name=body_name,
+                pos=positions[i],
+                mocap=True,  # Critical for dynamic positioning via data.mocap_pos
+            )
+
+            # Add a visualization geom to the mocap body
+            obstacle_body.add_geom(
+                name=f"geom_{body_name}",  # Geom must have a unique name
+                type=mj.mjtGeom.mjGEOM_BOX,
+                size=sizes[i],  # Small sphere size
+                pos=[0, 0, 0],
+                rgba=[0, 1, 0, 1.0],  # Start invisible (alpha 0.0)
+                group=2,
+            )
+        print(f"Added {4} obstacle bodies programmatically.")
+
+    def _add_camera_to_spec(self):
+        """Programmatically adds the camera to the end-effector body."""
+        # Find the end-effector body in the spec
+        # print(dir(mj))
+        # print(dir(self.spec.worldbody))
+        eef_body_spec = self.spec.worldbody.find_child(self.end_effector_site_name)
+        print(f"EEBODY: {eef_body_spec.name}")
+
+        if eef_body_spec:
+            eef_body_spec.add_camera(
+                name=self.CAMERA_NAME,
+                pos=[0, 0, 0.05],
+                # Default MuJoCo camera alignment
+                xyaxes=[1, 0, 0, 0, 0, -1],
+                fovy=60,
+                # mode=mj.mjtCamera,  # Camera pose is fixed relative to the body
+            )
+            print(
+                f"Added camera '{self.CAMERA_NAME}' to body '{self.end_effector_site_name}' programmatically."
+            )
+        else:
+            raise ValueError(
+                f"Could not find body '{self.end_effector_site_name}' in spec to attach camera."
+            )
+
+    def _get_marker_ids(self) -> Tuple[List[int], List[int]]:
+        """Collects IDs for all pre-allocated visualization geoms."""
+        body_ids = []
+        geom_ids = []
+        for i in range(self.NUM_VIZ_MARKERS):
+            body_id = mj_name2id(
+                self.model, mj.mjtObj.mjOBJ_BODY, f"{self.MARKER_PREFIX}{i}"
+            )
+            geom_id = mj_name2id(
+                self.model, mj.mjtObj.mjOBJ_GEOM, f"geom_{self.MARKER_PREFIX}{i}"
+            )
+            if body_id != -1:
+                body_ids.append(body_id)
+            if geom_id != -1:
+                geom_ids.append(geom_id)
+
+        return body_ids, geom_ids
+
+    def setup_offscreen_rendering(self, width: int = 640, height: int = 480):
+        """Initializes the off-screen rendering context for sensing."""
+        if not self.renderer:
+            self.renderer = mj.Renderer(self.model, height=height, width=width)
+            # print(dir(mj))
+            # print(dir(self.renderer.scene))
+            # self.renderer.set_camera(self.camera_id)
+            # self.renderer.update_scene()
+            print(f"Off-screen renderer set up for camera '{self.CAMERA_NAME}'.")
+
+    def release_offscreen_rendering(self):
+        """Releases the off-screen rendering context."""
+        self.renderer = None
 
     def step_simulation(self):
         """Advances the simulation by one step."""
@@ -225,7 +361,7 @@ class RobotPlanner:
         """
         # mj_step (or mj_forward which is called inside mj_step) populates data.ncon
         # Check if the number of active contacts is greater than 0
-        print(self.data.ncon)
+        # print(self.data.ncon)
         return self.data.ncon > 0
 
     def get_contacts_info(self):
@@ -297,6 +433,172 @@ class RobotPlanner:
 
             print("--- Viewer closed or display duration elapsed ---")
 
+    def disable_markers(self):
+        """Sets all visualization geoms to disabled (visible=0)."""
+        for geom_id in self.marker_geom_ids:
+            # Group 3 is often used for visualization geoms
+            self.model.geom_group[geom_id] = 3
+            # Disable visualization (visible=0 means do not render)
+            self.model.geom_rgba[geom_id, 3] = 0.0
+
+    def visualize_geoms(
+        self, points_xyz: np.ndarray, rgba: np.ndarray = np.array([0, 1, 0, 1])
+    ):
+        """
+        Moves the pre-allocated visualization geoms to match the given points.
+        The number of points is capped by NUM_VIZ_MARKERS.
+        """
+
+        # Ensure markers are disabled first
+        self.disable_markers()
+
+        n_points = min(len(points_xyz), self.NUM_VIZ_MARKERS)
+
+        print(
+            f"Visualizing {n_points} points using {len(self.marker_body_ids)} markers."
+        )
+
+        for i in range(n_points):
+            geom_id = self.marker_geom_ids[i]
+            body_id = self.marker_body_ids[i]
+            mocap_id = self.model.body_mocapid[body_id]
+
+            # Set the position (xpos) of the geom in the world frame
+            # MuJoCo sets geom position in the body's frame, but since these
+            # geoms are defined in the worldbody, xpos is the world position.
+            self.data.mocap_pos[mocap_id][:] = points_xyz[i, :]
+            # print(f"point: {points_xyz[i]} mocap: {self.data.mocap_pos[mocap_id]}")
+
+            # Enable visualization (alpha=1.0) and set color
+            self.model.geom_rgba[geom_id, :] = rgba
+            self.model.geom_rgba[geom_id, 3] = 1.0  # Set alpha to 1.0
+            self.model.geom_group[geom_id] = 2
+
+        # Must call mj_forward to update geometry positions for the viewer
+        mj.mj_forward(self.model, self.data)
+
+    def render_rgbd(self) -> tuple[np.ndarray, np.ndarray]:
+        self.renderer.update_scene(self.data, camera=self.camera_id)
+        self.renderer.enable_depth_rendering()
+        depth = self.renderer.render()
+        self.renderer.disable_depth_rendering()
+        rgb = self.renderer.render()
+        return rgb, depth
+
+    def rgbd_to_pointcloud(
+        self,
+        rgb: np.ndarray,
+        depth: np.ndarray,
+        intr: np.ndarray,
+        extr: np.ndarray,
+        width: int,
+        height: int,
+        depth_trunc: float = 20.0,
+    ):
+        cc, rr = np.meshgrid(np.arange(width), np.arange(height), sparse=True)
+        valid = (depth > 0) & (depth < depth_trunc)
+        z = np.where(valid, depth, np.nan)
+        x = np.where(valid, z * (cc - intr[0, 2]) / intr[0, 0], 0)
+        y = np.where(valid, z * (rr - intr[1, 2]) / intr[1, 1], 0)
+        xyz = np.vstack([e.flatten() for e in [x, y, z]]).T
+        color = rgb.transpose([2, 0, 1]).reshape((3, -1)).T / 255.0
+        mask = np.isnan(xyz[:, 2])
+        xyz = xyz[~mask]
+        color = color[~mask]
+        xyz_h = np.hstack([xyz, np.ones((xyz.shape[0], 1))])
+        xyz_t = (extr @ xyz_h.T).T
+        xyzrgb = np.hstack([xyz_t[:, :3], color])
+        return xyzrgb
+
+    # === Sensing Feature ===
+    def _downsample_point_cloud(self, point_cloud: np.ndarray) -> np.ndarray:
+        """
+        Uniformly downsamples the point cloud to match the number of available markers.
+        """
+        n_points = point_cloud.shape[0]
+        n_markers = self.NUM_VIZ_MARKERS
+
+        if n_points <= n_markers:
+            print(
+                f"Point cloud size ({n_points}) is less than or equal to marker count ({n_markers}). No downsampling needed."
+            )
+            return point_cloud
+
+        # Use np.random.choice to select n_markers indices uniformly
+        # replace=False ensures we sample unique points
+        selected_indices = np.random.choice(n_points, size=n_markers, replace=False)
+
+        downsampled_cloud = point_cloud[selected_indices, :]
+        print(f"Downsampled {n_points} points to {n_markers} points for visualization.")
+        return downsampled_cloud
+
+    def capture_point_cloud(self, far_clip: float = 3.0) -> Optional[np.ndarray]:
+        """
+        Captures a depth map from the eef_camera and converts it to a 3D point cloud
+        in the world frame.
+        """
+        if not self.renderer:
+            print(
+                "Error: Off-screen renderer not set up. Call setup_offscreen_rendering()."
+            )
+            return None
+
+        # 1. Ensure latest robot state is forwarded
+        mj.mj_forward(self.model, self.data)
+
+        # 2. Render the depth image
+        self.renderer.enable_depth_rendering()
+        self.renderer.update_scene(self.data, camera=self.CAMERA_NAME)
+        depth = self.renderer.render()
+        # depth = self.renderer.get_depth_np()
+
+        # Get width and height from the renderer
+        width, height = self.renderer.width, self.renderer.height
+
+        # 3. Convert depth map to point cloud
+        # Use mjd_camera_helper to transform depth to (x,y,z) coordinates
+        # mj.mjd_camera_helper(
+        #    self.model,
+        #    self.data,
+        #    points,
+        #    depth.flatten(),
+        #    self.camera_id,
+        #    0,  # camera type (0=fixed)
+        #    width,
+        #    height,
+        #    far_clip,  # z-near/z-far are read from camera geom data
+        # )
+        # points = self.depth_to_world(depth, self.camera_id, width, height)
+        # from: https://github.com/google-deepmind/mujoco/issues/1863#issuecomment-2292140372
+        # Intrinsic matrix.
+        fov = self.model.cam_fovy[self.camera_id]
+        theta = np.deg2rad(fov)
+        fx = width / 2 / np.tan(theta / 2)
+        fy = height / 2 / np.tan(theta / 2)
+        cx = (width - 1) / 2.0
+        cy = (height - 1) / 2.0
+        intr = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+
+        # Extrinsic matrix.
+        cam_pos = self.data.cam_xpos[self.camera_id]
+        cam_rot = self.data.cam_xmat[self.camera_id].reshape(3, 3)
+        extr = np.eye(4)
+        extr[:3, :3] = cam_rot.T
+        extr[:3, 3] = cam_pos
+        rgb, depth = self.render_rgbd()
+        points = self.rgbd_to_pointcloud(rgb, depth, intr, extr, width, height)
+
+        # 4. Filter out points beyond the far clip (where depth is 1.0)
+        # and points at origin (0,0,0) which can be invalid.
+        # valid_indices = np.where(
+        #    (depth.flatten() < 1.0) & (np.linalg.norm(points, axis=1) > 1e-4)
+        # )[0]
+
+        print(f"depth shape: {depth.shape}")
+        print(f"Captured {len(points)} valid points from camera.")
+
+        return self._downsample_point_cloud(points[:, :3])
+
     def play_trajectory(
         self,
         trajectory: np.ndarray,
@@ -314,6 +616,28 @@ class RobotPlanner:
         if trajectory is None or trajectory.size == 0:
             print("Error: Trajectory buffer is empty.")
             return
+
+        # Select key points to visualize (using trajectory markers)
+        path_indices = np.linspace(
+            0, trajectory.shape[0] - 1, self.NUM_VIZ_MARKERS, dtype=int
+        )
+        path_points_q = trajectory[path_indices]
+
+        # Temporarily store the initial state to reset later
+        q_initial = self.data.qpos.copy()
+
+        # Compute the world position of the TCP for each marker location
+        marker_positions = []
+        for q in path_points_q:
+            self.set_joint_positions(q)
+            mj.mj_forward(self.model, self.data)
+            marker_positions.append(self.get_tcp_position().copy())
+
+        # Convert to numpy array and visualize the full path
+        path_xyz = np.array(marker_positions)
+        self.visualize_geoms(
+            path_xyz, rgba=np.array([1, 0.5, 0, 1])
+        )  # Orange path markers
 
         timestep = self.model.opt.timestep
         num_steps = trajectory.shape[0]
@@ -357,6 +681,10 @@ class RobotPlanner:
                 step_count += 1
 
             print("--- Trajectory playback finished ---")
+        # Reset robot and disable visualization markers after viewer closes
+        self.set_joint_positions(q_initial)
+        self.disable_markers()
+        mj.mj_forward(self.model, self.data)
 
 
 # ====================================================================
