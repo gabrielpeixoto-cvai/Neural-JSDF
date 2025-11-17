@@ -111,7 +111,7 @@ def mujoco_mesh_fk(robot_model, qpos) -> List[trimesh.Trimesh]:
         body_pos = d.xpos[body_id]
         body_mat = d.xmat[body_id].reshape(3, 3)
 
-        print(f"POS: {body_pos}")
+        # print(f"POS: {body_pos}")
         # 3. Construct the 4x4 homogeneous transformation matrix
         T = np.eye(4)
         # Rotation (top-left 3x3)
@@ -317,15 +317,28 @@ if __name__ == "__main__":
 
     # 2. Dataset Configuration
     N_MESHES = len(mesh_data)
-    N_JPOS = 10  # Number of joint positions to sample
-    # N_JPOS = 5000  # Uncomment for the value used in the paper
+    # N_JPOS = 10  # Number of joint positions to sample
+    N_JPOS = 500  # Uncomment for the value used in the paper
+    # N_SAMPLES_JPOS = 110 # original
+    N_SAMPLES_JPOS = 220  # original
+
+    SAMPLE_RATIO_INSIDE = 0.25
+    SAMPLE_RATIO_OUTSIDE = 0.35
+    SAMPLE_RATIO_CLOSE = 0.15  # original 20
+    SAMPLE_RATIO_FAR = 0.15  # original 20
+    SAMPLE_RATIO_ZERO = 0.10
 
     # Points per mesh per type (from genDataset.m)
-    N_INSIDE = np.full(N_MESHES, 25)
-    N_OUTSIDE = np.full(N_MESHES, 35)
-    N_CLOSE = np.full(N_MESHES, 20)
-    N_FAR = np.full(N_MESHES, 20)
-    N_ZERO = np.full(N_MESHES, 10)
+    # N_INSIDE = np.full(N_MESHES, 25)
+    # N_OUTSIDE = np.full(N_MESHES, 35)
+    # N_CLOSE = np.full(N_MESHES, 20)
+    # N_FAR = np.full(N_MESHES, 20)
+    # N_ZERO = np.full(N_MESHES, 10)
+    N_INSIDE = np.full(N_MESHES, int(N_SAMPLES_JPOS / SAMPLE_RATIO_INSIDE))
+    N_OUTSIDE = np.full(N_MESHES, int(N_SAMPLES_JPOS / SAMPLE_RATIO_OUTSIDE))
+    N_CLOSE = np.full(N_MESHES, int(N_SAMPLES_JPOS / SAMPLE_RATIO_CLOSE))
+    N_FAR = np.full(N_MESHES, int(N_SAMPLES_JPOS / SAMPLE_RATIO_FAR))
+    N_ZERO = np.full(N_MESHES, int(N_SAMPLES_JPOS / SAMPLE_RATIO_ZERO))
 
     box_delta = 0.1
     # Bounding box for 'far' points (global workspace)
@@ -436,7 +449,7 @@ if __name__ == "__main__":
     final_dataset = np.vstack(all_data)
 
     # Save the dataset to a file (e.g., NumPy .npy or CSV)
-    np.save(f"{model_name}_dataset_py.npy", final_dataset)
+    np.save(f"{model_name}_dataset_py_{N_JPOS}_{N_SAMPLES_JPOS}.npy", final_dataset)
     # np.savetxt('robot_dataset.csv', final_dataset, delimiter=',')
 
     print(f"\nDataset generation complete. Total samples: {final_dataset.shape[0]}")
