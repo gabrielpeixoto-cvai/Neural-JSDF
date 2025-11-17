@@ -62,6 +62,7 @@ def visualize_sdf_points_and_meshes(
     """
     try:
         dataset = np.load(npy_path)
+        print(dataset.shape)
     except FileNotFoundError:
         print(f"ERROR: '{npy_path}' not found. Cannot visualize dataset.")
         return
@@ -181,6 +182,7 @@ def map_scalar_to_color_custom(data, vmin=-0.1, vmax=0.1, zero_tolerance=1e-4):
     # Color: Red (255, 0, 0)
     idx_negative = data < -zero_tolerance
     colors[idx_negative, 0] = 255  # R
+    # colors[idx_negative, 3] = 255
 
     # 2. Positive (Outside the mesh): Blue
     # d_min > +tolerance: fully Blue
@@ -211,7 +213,7 @@ def map_scalar_to_color_custom(data, vmin=-0.1, vmax=0.1, zero_tolerance=1e-4):
 
 
 def visualize_sdf_points_trimesh(
-    npy_path="robot_dataset_py.npy", N_MESHES=9, N_PTS_PER_JPOS=990
+    npy_path="datasets/data_mesh_test.mat", N_MESHES=9, N_PTS_PER_JPOS=990
 ):
     """
     Loads the dataset, selects a single joint position's data,
@@ -219,7 +221,14 @@ def visualize_sdf_points_trimesh(
     transformed robot links using Trimesh.
     """
     try:
-        dataset = np.load(npy_path)
+        if npy_path.split(".")[-1] == "npy":
+            dataset = np.load(npy_path)
+        else:
+            mat_contents = sio.loadmat(npy_path)
+            first_key = next(
+                (key for key in mat_contents.keys() if not key.startswith("__")), None
+            )
+            dataset = mat_contents[first_key]
     except FileNotFoundError:
         print(f"ERROR: '{npy_path}' not found. Cannot visualize dataset.")
         return
@@ -242,6 +251,7 @@ def visualize_sdf_points_trimesh(
     vmax = np.max(d_min_plot)
     vmin = np.min(d_min_plot)
     point_colors = map_scalar_to_color_custom(d_min_plot, vmin=vmin, vmax=vmax)
+    print(d_min_plot[d_min_plot < 0])
 
     # Create Trimesh Point Cloud for SDF data
     sdf_point_cloud = trimesh.points.PointCloud(pts_plot, colors=point_colors)
@@ -274,10 +284,18 @@ def visualize_sdf_points_trimesh(
     scene.show()
 
 
-def diagnose_dmin_range(npy_path="robot_dataset_py.npy", N_PTS_PER_JPOS=990):
+def diagnose_dmin_range(npy_path="datasets/data_mesh_test.mat", N_PTS_PER_JPOS=990):
     """Calculates and prints statistics for the subset of d_min values being plotted."""
     try:
-        dataset = np.load(npy_path)
+        if npy_path.split(".")[-1] == "npy":
+            dataset = np.load(npy_path)
+        else:
+            mat_contents = sio.loadmat(npy_path)
+            first_key = next(
+                (key for key in mat_contents.keys() if not key.startswith("__")), None
+            )
+            dataset = mat_contents[first_key]
+
     except FileNotFoundError:
         print(f"ERROR: '{npy_path}' not found. Cannot diagnose dataset.")
         return
@@ -301,7 +319,8 @@ def diagnose_dmin_range(npy_path="robot_dataset_py.npy", N_PTS_PER_JPOS=990):
     print("--------------------------------------------------")
 
 
-diagnose_dmin_range()
+DATASET_PATH = "robot_dataset_py.npy"
+diagnose_dmin_range(npy_path=DATASET_PATH)
 # Execute the visualization function
 # visualize_sdf_points_and_meshes(N_MESHES=9)
-visualize_sdf_points_trimesh(N_MESHES=9)
+visualize_sdf_points_trimesh(npy_path=DATASET_PATH, N_MESHES=9)

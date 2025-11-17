@@ -160,6 +160,7 @@ def map_scalar_to_color_custom(data, vmin=-0.1, vmax=0.1, zero_tolerance=1e-4):
     # Color: Red (255, 0, 0)
     idx_negative = data < -zero_tolerance
     colors[idx_negative, 0] = 255  # R
+    # colors[idx_negative, 3] = 255  # R
 
     # 2. Positive (Outside the mesh): Blue
     # d_min > +tolerance: fully Blue
@@ -223,7 +224,8 @@ def visualize_sdf_points_trimesh(
     print(f"Plotting for joint position (q): {q}")
     print(f"Plotting {pts_plot.shape[0]} query points.")
     print(f"Plotting {dist_arr.shape} query points.")
-    print(f"DMIN: {d_min_plot}")
+    # print(f"DMIN: {d_min_plot}")
+    print(d_min_plot[d_min_plot < 0])
 
     # 2. Color the Query Points by d_min
     # Use a range centered around 0 (the surface)
