@@ -30,21 +30,21 @@ except ImportError as e:
     sys.exit(1)
 
 # Define the boundaries of the sampling cube (in meters)
-MIN_BOUND = -1.5
-MAX_BOUND = 1.5
+MIN_BOUND = -0.1
+MAX_BOUND = 0.1
 
 # Define the resolution (number of samples along each axis)
 # Warning: Resolution 60 -> 216,000 points. Resolution 100 -> 1,000,000 points.
 RESOLUTION = 100
 
 # Define the threshold for considering a point "on the surface"
-SURFACE_THRESHOLD = 0.005  # meters (5 mm tolerance)
+SURFACE_THRESHOLD = 1.0  # meters (5 mm tolerance)
 # Use a fixed number of samples, as random sampling density isn't uniform.
-NUM_SAMPLES = 500000
+NUM_SAMPLES = 50
 # Standard Deviation (spread) of the Gaussian distribution.
 # This controls how far from the center (mean) the points are sampled.
 # Since your bounds were [-1, 1], a std_dev of 0.3 to 0.5 is reasonable.
-GAUSSIAN_STD_DEV = 0.7
+GAUSSIAN_STD_DEV = 0.5
 GAUSSIAN_MEAN = np.array([0.0, 0.0, 0.0], dtype=np.float32)  # Centered at the Original
 
 # --- Random Seed for Reproducibility ---
@@ -59,7 +59,8 @@ NETWORK_SKIPS = []
 OUTPUT_CHANNELS = 9  # Example: Assuming 7 links for a typical robot. ADJUST THIS!
 
 # Define the path to your trained model weights (taken from run_sdf.py)
-MODEL_WEIGHTS_PATH = "sdf_256x5_mesh.pt"
+# MODEL_WEIGHTS_PATH = "sdf_256x5_mesh_py.pt"
+MODEL_WEIGHTS_PATH = "franka_collision_model.pt"
 # Define the path to your ground-truth mesh data
 MESH_DATA_PATH = "../data-sampling/meshes/mesh_light_pts.mat"
 
@@ -147,9 +148,9 @@ def get_surface_point_cloud(
             # Your train_sdf.py shows mean_x/std_x are 0.0/1.0 ("disabled because of nerf features!")
             # but it is safer to check. We'll use the raw model.forward for maximum compatibility
             # with the inference path in run_sdf.py which uses raw tensors `y_pred = model.forward(x)`.
-
             # Since the goal is distance, we call forward on the core model
             output_distances = nn_model.model.forward(input_tensor)
+            output_distances = output_distances
 
             # Apply scaling back to the output if norm_dict is present and needed
             if "y" in nn_model.norm_dict:
@@ -159,9 +160,8 @@ def get_surface_point_cloud(
                 # so the output must be scaled back by a factor of 100* and then by std_y/mean_y
                 # For safety, let's assume the run_sdf.py path is correct:
                 # y_pred = torch.mul(y_pred, std_y) + mean_y
-
                 # To match run_sdf.py logic where scaling is mostly disabled:
-                # y_pred = torch.mul(y_pred, std_y) + mean_y
+                # output_distances = torch.mul(y_pred, std_y) + mean_y
                 min_distances = output_distances.min(dim=1)[0].cpu().numpy()
 
             else:
@@ -176,11 +176,21 @@ def get_surface_point_cloud(
 
     # Identify points where the min distance is close to zero
     surface_mask = min_distances < threshold
+    # print(min_distances)
+    # print(min(min_distances))
+    for i in range(len(points_3d)):
+        print(
+            f"[{i}] point: {points_3d[i]}\n[{i}]dst: {min_distances[i]}\n[i]output:{output_distances[i].cpu().numpy()}"
+        )
 
     # Extract the 3D coordinates that satisfy the surface condition
     surface_points = points_3d[surface_mask & positive_mask]
-    surface_points = points_3d[(min_distances >= 0.0) & (min_distances <= threshold)]
-    filtered_dst = min_distances[(min_distances >= 0.0) & (min_distances <= threshold)]
+    surface_points = points_3d[
+        (min_distances >= -threshold) & (min_distances <= threshold)
+    ]
+    filtered_dst = min_distances[
+        (min_distances >= -threshold) & (min_distances <= threshold)
+    ]
 
     print(f"✅ Finished sampling. Found {len(surface_points)} surface points.")
     return surface_points, filtered_dst
@@ -207,7 +217,7 @@ def main():
     # 2. Sample Points and Extract Surface
     surface_points = []
     surface_distances = []
-    for _ in range(1000):
+    for _ in range(1):
         temp_points, temp_dst = get_surface_point_cloud(
             nn_model,
             FIXED_JOINT_COORDS_NP,
@@ -224,7 +234,7 @@ def main():
             surface_points.append(temp_points[point_idx])
             surface_distances.append(temp_dst[point_idx])
     surface_points = np.array(surface_points)
-    print(surface_distances)
+    # print(surface_distances)
     # Load .mat file
     try:
         mat_contents = sio.loadmat(MESH_DATA_PATH)
