@@ -31,6 +31,9 @@ import os
 import matplotlib.pyplot as plt
 from sdf.robot_sdf import RobotSdfCollisionNet
 
+DATASET_PATH = "../data-sampling/ur5e_dataset_py_5000.npy"
+MODEL_PREFIX = f"{DATASET_PATH.split('/')[-1].split('.')[0]}_"
+
 
 # NEW: Add Dataset class (as shown above)
 class RobotSDFDataset(torch.utils.data.Dataset):
@@ -57,7 +60,7 @@ def create_dataset(robot_name):
     # --- NEW CODE (NumPy .npy file loading) ---
     try:
         # Load the dataset saved by gen_dataset.py
-        data = np.load("../data-sampling/robot_dataset.npy")
+        data = np.load(DATASET_PATH)
     except FileNotFoundError:
         print(
             "Error: 'robot_dataset.npy' not found. Ensure gen_dataset.py was run and saved the file."
@@ -81,15 +84,18 @@ def create_dataset(robot_name):
     # --- MODIFIED: Load data as full-precision CPU tensors (or NumPy arrays) ---
     # We will use float32 now, and switch to float16 inside the loop for AMP.
     # The original script used float16 immediately, which is less common for the full dataset.
-    x_full = torch.Tensor(data[L1:L2, 0:10])  # Keep on CPU for now
-    y_full = 100 * torch.Tensor(data[L1:L2, 10:])  # Keep on CPU for now
+    x_full = torch.Tensor(data[L1:L2, 0:9])  # Keep on CPU for now
+    y_full = 100 * torch.Tensor(data[L1:L2, 9:])  # Keep on CPU for now
+    # print(data.shape)
+    # print(data[0])
+    # input("continue")
     # y[y<0]*=5
     # y[y==0] = 1
     dof = x_full.shape[1]
     s = 256
     n_layers = 5
     skips = []
-    fname = "sdf_%dx%d_mesh_py.pt" % (s, n_layers)
+    fname = f"{MODEL_PREFIX}sdf_{s}x{n_layers}_mesh_py.pt"
     if skips == []:
         n_layers -= 1
     nn_model = RobotSdfCollisionNet(
@@ -109,7 +115,9 @@ def create_dataset(robot_name):
     print(repr(model))
     print("Sum of parameters:%d" % nelem)
     # --- MODIFIED: Create Dataset and DataLoader instances ---
-    BATCH_SIZE = 409600  # Adjust this value based on your GPU memory
+    BATCH_SIZE = (
+        32768  # int(len(idx_train) / 2)  # Adjust this value based on your GPU memory
+    )
     # time.sleep(2)
     # load training set:
     """
@@ -168,11 +176,11 @@ def create_dataset(robot_name):
     )
 
     # Pre-calculate indices for close points on the CPU
-    y_train_labels = y_train_cpu
+    y_train_labels = y_train_cpu.clone()
     y_train_labels[y_train_labels <= 0] = -1
     y_train_labels[y_train_labels > 0] = 1
 
-    y_val_labels = y_val_cpu
+    y_val_labels = y_val_cpu.clone()
     y_val_labels[y_val_labels <= 0] = -1
     y_val_labels[y_val_labels > 0] = 1
 
@@ -191,13 +199,17 @@ def create_dataset(robot_name):
         verbose=True,
     )
     # print(model)
-    epochs = 100000
+    epochs = 10000
     min_loss = 2000.0
     # training:
     e_notsaved = 0
     scaler = torch.cuda.amp.GradScaler(enabled=True)
     idx_close_train = y_train_cpu[:, -1] < 10
     idx_close_val = y_val_cpu[:, -1] < 10
+    # for i, (x_batch, y_batch) in enumerate(train_loader):
+    #    print(x_batch)
+    #    print(y_batch)
+    # input("continue")
 
     for e in range(epochs):
         t0 = time.time()
