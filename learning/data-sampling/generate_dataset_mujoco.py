@@ -318,9 +318,9 @@ if __name__ == "__main__":
     # 2. Dataset Configuration
     N_MESHES = len(mesh_data)
     # N_JPOS = 10  # Number of joint positions to sample
-    N_JPOS = 500  # Uncomment for the value used in the paper
+    N_JPOS = 5000  # Uncomment for the value used in the paper
     # N_SAMPLES_JPOS = 110 # original
-    N_SAMPLES_JPOS = 220  # original
+    N_SAMPLES_JPOS = 110  # original
 
     SAMPLE_RATIO_INSIDE = 0.25
     SAMPLE_RATIO_OUTSIDE = 0.35

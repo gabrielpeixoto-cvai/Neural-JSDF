@@ -199,7 +199,7 @@ def create_dataset(robot_name):
         verbose=True,
     )
     # print(model)
-    epochs = 10000
+    epochs = 100000
     min_loss = 2000.0
     # training:
     e_notsaved = 0

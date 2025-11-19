@@ -2,6 +2,7 @@ from typing import final
 import numpy as np
 import trimesh
 import torch
+import time
 import os
 import random
 import sys
@@ -194,6 +195,7 @@ def get_surface_point_cloud(
 
     # --- Inference ---
     with torch.no_grad():
+        start = time.perf_counter()
         if hasattr(nn_model, "norm_dict"):
             output_distances = nn_model.model.forward(input_tensor)
             # Assuming a standard normalization path, otherwise this is a no-op
@@ -205,6 +207,7 @@ def get_surface_point_cloud(
         else:
             output_distances = nn_model.model.forward(input_tensor)
             min_distances = output_distances.min(dim=1)[0].cpu().numpy()
+        end = time.perf_counter()
     # print(points_3d)
     # print(output_distances)
     # print(min_distances)
@@ -218,7 +221,7 @@ def get_surface_point_cloud(
     filtered_dst = min_distances[(min_distances >= 0.0) & (min_distances <= threshold)]
 
     print(f"✅ Finished sampling. Found {len(surface_points)} surface points.")
-    return surface_points, filtered_dst
+    return surface_points, filtered_dst, end - start
 
 
 def main():
@@ -263,9 +266,10 @@ def main():
     # We will loop once with a larger sample count to get a dense cloud.
     surface_points = []
     surface_distances = []
+    times = []
 
     for _ in range(10):
-        pt, dst = get_surface_point_cloud(
+        pt, dst, time = get_surface_point_cloud(
             nn_model,
             FIXED_JOINT_COORDS_NP,
             MIN_BOUND,
@@ -280,10 +284,14 @@ def main():
         for point_idx in range(len(pt)):
             surface_points.append(pt[point_idx])
             surface_distances.append(dst[point_idx])
+        times.append(time)
     # --- Visualization Setup ---
     surface_points = np.array(surface_points)
     # print(surface_points)
     # print(surface_distances)
+    print(
+        f"Total inference time for {NUM_SAMPLES*10} samples: {sum(times)} s average time for sample {sum(times)/len(surface_points)} s "
+    )
     scene = trimesh.Scene()
 
     # A. Add Ground-Truth Mesh (Original Robot Links)
