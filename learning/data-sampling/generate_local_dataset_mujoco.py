@@ -13,6 +13,7 @@ from utils import (
 import trimesh
 import mujoco
 from typing import Tuple, List, Dict
+import igl
 
 
 # --- Utility Functions from Original Script (Included for completeness) ---
@@ -278,8 +279,8 @@ def display_mujoco_meshes_and_sdfs(
 
 
 def generate_local_dataset(
-    mesh_data: List[trimesh.Trimesh], mesh_names: List[str]
-) -> Dict[str, np.ndarray]:
+    mesh_data: List[trimesh.Trimesh], mesh_names: List[str], output_dir: Path
+) -> None:
     """
     Generates a dataset of [x, y, z, signed_distance] for each link mesh
     in its local coordinate frame.
@@ -294,7 +295,7 @@ def generate_local_dataset(
     """
     # 2. Dataset Configuration (Same ratios as original for consistency)
     N_MESHES = len(mesh_data)
-    N_SAMPLES_LINK = 50  # Total samples per link (adjust as needed)
+    N_SAMPLES_LINK = 10000  # Total samples per link (adjust as needed)
 
     # Ratios for point types
     SAMPLE_RATIO_INSIDE = 0.25
@@ -315,7 +316,7 @@ def generate_local_dataset(
     if N_TOTAL_SAMPLED != N_SAMPLES_LINK:
         N_ZERO += N_SAMPLES_LINK - N_TOTAL_SAMPLED
 
-    box_delta = 0.1
+    box_delta = 0.01
     # Global Bounding box for 'far' points. Assuming a roughly centered robot at world origin (0,0,0)
     bbox_far_global = {
         "xmin": -1,
@@ -326,11 +327,10 @@ def generate_local_dataset(
         "zmax": 1,
     }
 
-    local_datasets = {}
-
     print(
         f"\n--- Generating Local SDF Dataset for {N_MESHES} Links ({N_SAMPLES_LINK} points each) ---"
     )
+    total_samples = 0
 
     for j in tqdm(range(N_MESHES), desc="Generating link datasets"):
         mesh = mesh_data[j]
@@ -387,7 +387,19 @@ def generate_local_dataset(
         )
 
         # necessary to handle non-watertight meshes
-        points_inside = trimesh_mesh.contains(pts_link_local)
+        # ray-casting method
+        # points_inside = trimesh_mesh.contains(pts_link_local)
+
+        # WITH LIBIGL WINDING NUMBER:
+        # igl expects vertices and faces as double/int numpy arrays
+        # Note: F must be (N, 3) int32/64, V must be (N, 3) float64
+        winding_numbers = igl.winding_number(
+            V.astype(np.float64), F.astype(np.int64), pts_link_local.astype(np.float64)
+        )
+
+        # A winding number > 0.5 typically indicates the point is inside
+        points_inside = winding_numbers > 0.5
+
         signed_distances_abs = abs(signed_distances)
         signed_distances_abs[np.where(points_inside)] = (
             -1 * signed_distances_abs[np.where(points_inside)]
@@ -396,11 +408,19 @@ def generate_local_dataset(
         # 5. Create and Store Dataset Entry: [x, y, z, d]
         local_dataset = np.hstack([pts_link_local, signed_distances_abs[:, np.newaxis]])
 
-        # display_local_sampling(link_name, trimesh_mesh, local_dataset)
+        display_local_sampling(link_name, trimesh_mesh, local_dataset)
+        # Save each link's dataset to a separate file
+        save_path = output_dir / f"{link_name}_sdf.npy"
+        np.save(save_path, local_dataset)
+        print(
+            f"Saved dataset for {link_name} with {local_dataset.shape[0]} samples to {save_path.name}"
+        )
+        total_samples += local_dataset.shape[0]
 
-        local_datasets[link_name] = local_dataset
-
-    return local_datasets
+    print(
+        f"\nLocal Dataset generation complete. Total samples across all links: {total_samples}"
+    )
+    print(f"Data saved to directory '{output_dir}'. Columns: [x, y, z, d]")
 
 
 # --- NEW Local Visualization Function ---
@@ -435,14 +455,14 @@ def display_local_sampling(
     scene.add_geometry(sdf_point_cloud)
 
     # 4. Add the local mesh
-    if local_mesh.visual.kind == "face":
-        color = np.array([150, 150, 150, 150])
-        local_mesh.visual.face_colors = color
+    # if local_mesh.visual.kind == "face":
+    color = np.array([150, 150, 150, 150])
+    local_mesh.visual.face_colors = color
 
     scene.add_geometry(local_mesh)
 
     try:
-        scene.show()
+        scene.show(smooth=False)
     except Exception as e:
         print(f"\n[ERROR] Local Trimesh viewer failed: {e}")
 
@@ -463,27 +483,12 @@ if __name__ == "__main__":
     q_min_raw, q_max_raw = get_joint_limits(robot_model)
     # display_mujoco_meshes(local_mesh_data)
 
-    # 2. Generate Local SDF Datasets
-    local_datasets = generate_local_dataset(local_mesh_data, mesh_names)
-
     # 3. Save the Datasets (E.g., one .npy file per link)
     output_dir = Path(f"{model_name}_local_sdf_datasets")
     output_dir.mkdir(exist_ok=True)
 
-    total_samples = 0
-    for link_name, dataset in local_datasets.items():
-        # Save each link's dataset to a separate file
-        save_path = output_dir / f"{link_name}_sdf.npy"
-        np.save(save_path, dataset)
-        print(
-            f"Saved dataset for {link_name} with {dataset.shape[0]} samples to {save_path.name}"
-        )
-        total_samples += dataset.shape[0]
-
-    print(
-        f"\nLocal Dataset generation complete. Total samples across all links: {total_samples}"
-    )
-    print(f"Data saved to directory '{output_dir}'. Columns: [x, y, z, d]")
+    # 2. Generate Local SDF Datasets
+    generate_local_dataset(local_mesh_data, mesh_names, output_dir)
 
     # --- 4. Visualization Step (using a random joint angle) ---
 
@@ -526,8 +531,10 @@ if __name__ == "__main__":
         T_world_link[:3, :3] = body_mat
         T_world_link[:3, 3] = body_pos
 
+        data_path = output_dir / f"{link_name}_sdf.npy"
+        local_dataset = np.load(data_path)
         # 2. Get the local dataset [x, y, z, d]
-        dataset = local_datasets[link_name]
+        dataset = local_dataset
         pts_local = dataset[:, :3]
         sdfs_local = dataset[:, 3]
 
