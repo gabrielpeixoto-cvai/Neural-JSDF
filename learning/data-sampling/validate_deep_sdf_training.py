@@ -15,6 +15,9 @@ except ImportError:
     sys.exit(1)
 
 # --- 1. Utility Functions (Consolidated from Data Generation) ---
+from skimage import measure
+import gc
+import matplotlib.pyplot as plt
 
 
 # Mock Model & Data loading (replace with your actual paths/imports)
@@ -479,6 +482,47 @@ def validate_model(
     decoder, latent_vec = load_trained_model(
         experiment_dir, target_link_name, latent_size
     )
+
+    # 1. Reconstruct the mesh using the model (In Local Frame)
+    print(f"Reconstructing mesh for {target_link_name}...")
+    reconstructed_mesh_local = reconstruct_mesh_from_sdf(
+        decoder, latent_vec, local_bbox, resolution=128  # 128 is high quality
+    )
+    reconstructed_mesh_local = visualize_error_safe(
+        local_mesh, reconstructed_mesh_local, chunk_size=10000
+    )
+
+    if reconstructed_mesh_local:
+        # 2. Transform the reconstructed mesh to World Frame for visualization
+        # P_world = T_W_L @ P_local
+        reconstructed_mesh_local.apply_transform(T_W_L)
+
+        # 3. Visualize
+        # Let's give the reconstructed mesh a distinct color (e.g., Semi-transparent Gold)
+        # reconstructed_mesh_local.visual.face_colors = [255, 215, 0, 255]
+
+        # Get the original MuJoCo meshes
+        transformed_meshes = mujoco_mesh_fk(robot_model, q_rand)
+
+        # Add our new mesh to the scene
+        scene = trimesh.Scene(transformed_meshes)
+
+        scene.add_geometry(reconstructed_mesh_local)
+        for mesh in transformed_meshes:
+            if mesh.visual.kind == "face":
+                mesh.visual = trimesh.visual.color.ColorVisuals(mesh=mesh)
+                mesh.visual.face_colors = np.array(
+                    [150, 150, 150, 150], dtype=np.uint8
+                )  # Gray and transparent
+            else:
+                mesh.visual.face_colors = np.array(
+                    [150, 150, 150, 150], dtype=np.uint8
+                )  # Gray and transparent
+
+            scene.add_geometry(mesh)
+
+        scene.show(smooth=False)
+
     with torch.no_grad():
         points_local_tensor = torch.from_numpy(points_local).cuda().float()
         batch_latent = latent_vec.expand(n_sample_points, -1)
@@ -488,6 +532,168 @@ def validate_model(
     # 8. Display result (World points colored by predicted SDFs)
     transformed_meshes = mujoco_mesh_fk(robot_model, q_rand)
     display_mujoco_meshes_and_sdfs(transformed_meshes, points_world, predicted_sdfs)
+
+
+def reconstruct_mesh_from_sdf(decoder, latent_vec, bbox, resolution=64):
+    """
+    Creates a mesh by querying the SDF on a regular grid.
+    """
+    # 1. Create a 3D grid of points in the local frame
+    grid_x = np.linspace(bbox["xmin"], bbox["xmax"], resolution)
+    grid_y = np.linspace(bbox["ymin"], bbox["ymax"], resolution)
+    grid_z = np.linspace(bbox["zmin"], bbox["zmax"], resolution)
+
+    # Generate coordinates
+    X, Y, Z = np.meshgrid(grid_x, grid_y, grid_z, indexing="ij")
+    points_local = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1).astype(
+        np.float32
+    )
+
+    # 2. Query the model in batches (to avoid GPU memory issues)
+    batch_size = 100000
+    predicted_sdfs = []
+
+    decoder.eval()
+    with torch.no_grad():
+        latent_batch = latent_vec.expand(batch_size, -1)
+        for i in range(0, points_local.shape[0], batch_size):
+            batch_pts = torch.from_numpy(points_local[i : i + batch_size]).cuda()
+            # Handle last batch size mismatch
+            if batch_pts.shape[0] != latent_batch.shape[0]:
+                curr_latent = latent_vec.expand(batch_pts.shape[0], -1)
+            else:
+                curr_latent = latent_batch
+
+            input_data = torch.cat([curr_latent, batch_pts], dim=1)
+            res = decoder(input_data).cpu().numpy().squeeze()
+            predicted_sdfs.append(res)
+
+    sdf_grid = np.concatenate(predicted_sdfs).reshape(
+        resolution, resolution, resolution
+    )
+
+    # 3. Marching Cubes to find the 0-level set (the surface)
+    # If the model didn't learn well, this might throw an error if no 0-level exists
+    try:
+        verts, faces, normals, values = measure.marching_cubes(sdf_grid, level=0.0)
+
+        # 4. Rescale vertices from grid indices back to local coordinate values
+        # Marching cubes returns indices (0 to resolution-1), we need meters
+        verts[:, 0] = (
+            verts[:, 0] * (bbox["xmax"] - bbox["xmin"]) / (resolution - 1)
+            + bbox["xmin"]
+        )
+        verts[:, 1] = (
+            verts[:, 1] * (bbox["ymax"] - bbox["ymin"]) / (resolution - 1)
+            + bbox["ymin"]
+        )
+        verts[:, 2] = (
+            verts[:, 2] * (bbox["zmax"] - bbox["zmin"]) / (resolution - 1)
+            + bbox["zmin"]
+        )
+
+        return trimesh.Trimesh(vertices=verts, faces=faces)
+    except ValueError:
+        print("Surface not found within the bounding box!")
+        return None
+
+
+def visualize_reconstruction_error(original_mesh, reconstructed_mesh):
+    """
+    Colors the reconstructed mesh based on its distance from the original mesh.
+    """
+    # 1. Find the closest point on the original mesh for every vertex in the reconstruction
+    # distances will be an array of scalars representing the error in meters
+    closest_points, distances, triangle_id = original_mesh.nearest.on_surface(
+        reconstructed_mesh.vertices
+    )
+
+    # 2. Map distances to a color map (e.g., 'jet' or 'viridis')
+    # We'll normalize error: 0 error = Blue, Max error = Red
+    max_err = 0.005  # 5mm error threshold for 'Red'
+    normalized_error = np.clip(distances / max_err, 0, 1)
+
+    # Create colors (RGBA)
+    import matplotlib.pyplot as plt
+
+    colormap = plt.get_cmap("jet")
+    vertex_colors = colormap(normalized_error)
+
+    # 3. Apply colors to the reconstructed mesh
+    reconstructed_mesh.visual.vertex_colors = vertex_colors
+
+    print(f"Mean Reconstruction Error: {np.mean(distances)*1000:.3f} mm")
+    print(f"Max Reconstruction Error: {np.max(distances)*1000:.3f} mm")
+
+    return reconstructed_mesh
+
+
+def visualize_reconstruction_error_batched(
+    original_mesh, reconstructed_mesh, chunk_size=10000
+):
+    verts = reconstructed_mesh.vertices
+    all_distances = []
+
+    # Calculate distances in smaller chunks to save RAM
+    for i in range(0, len(verts), chunk_size):
+        chunk = verts[i : i + chunk_size]
+        _, distances, _ = original_mesh.nearest.on_surface(chunk)
+        all_distances.append(distances)
+
+    distances = np.concatenate(all_distances)
+
+    # ... (rest of the coloring logic) ...
+    max_err = 0.005
+    normalized_error = np.clip(distances / max_err, 0, 1)
+    import matplotlib.pyplot as plt
+
+    colormap = plt.get_cmap("jet")
+    reconstructed_mesh.visual.vertex_colors = colormap(normalized_error)
+
+    return reconstructed_mesh
+
+
+def visualize_error_safe(
+    original_mesh, reconstructed_mesh, max_err=0.005, chunk_size=5000
+):
+    """
+    Calculates error in small chunks to prevent the 'Killed' OOM error.
+    """
+    print(f"Calculating error for {len(reconstructed_mesh.vertices)} vertices...")
+
+    verts = reconstructed_mesh.vertices
+    all_distances = []
+
+    # 1. Process distances in small chunks
+    for i in range(0, len(verts), chunk_size):
+        chunk = verts[i : i + chunk_size]
+        # Query nearest points on the original mesh
+        _, distances, _ = original_mesh.nearest.on_surface(chunk)
+        all_distances.append(distances)
+
+        # Periodic cleanup to help the OS manage RAM
+        if i % (chunk_size * 10) == 0:
+            gc.collect()
+
+    # 2. Combine results
+    distances = np.concatenate(all_distances)
+
+    # 3. Map to Colors (Jet Colormap)
+    # Blue = 0 error, Red = max_err (e.g., 5mm)
+    normalized_error = np.clip(distances / max_err, 0, 1)
+    colormap = plt.get_cmap("jet")
+    colors = colormap(normalized_error)
+
+    # Apply to mesh (RGBA)
+    reconstructed_mesh.visual.vertex_colors = colors
+
+    print(f"Done! Mean Error: {np.mean(distances)*1000:.2f}mm")
+
+    # Cleanup temporary arrays
+    del all_distances
+    gc.collect()
+
+    return reconstructed_mesh
 
 
 if __name__ == "__main__":
