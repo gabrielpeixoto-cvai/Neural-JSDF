@@ -121,7 +121,9 @@ def motion_planning_main():
         robot_planner = RobotPlanner(MJCF_FILE, EEF_BODY_NAME)
 
         # 3. Initialize the Motion Planner
-        motion_planner = MotionPlannerOMPL(planner_type=PLANNER_TYPE)
+        motion_planner = MotionPlannerOMPL(
+            planner_type=PLANNER_TYPE, collision_method="fcl"
+        )
         motion_planner.setup_planner(robot_planner)
         # 4. Setup Off-screen Rendering for Camera
         # Use a small resolution for faster capture in the demo

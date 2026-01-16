@@ -15,6 +15,8 @@ except ImportError:
     print("WARNING: OMPL Python bindings not found. MotionPlannerOMPL will not run.")
     ou, ob, og = None, None, None
 
+import fcl
+
 
 class RobotPlanner:
     """
@@ -90,6 +92,10 @@ class RobotPlanner:
             if mocap_slot != -1:
                 # Set identity quaternion for all visualization markers
                 self.data.mocap_quat[mocap_slot] = [1.0, 0.0, 0.0, 0.0]
+
+        # New FCL initialization
+        self.fcl_objects = []
+        self._init_fcl()
 
     def _add_viz_geoms_to_spec(self):
         """Programmatically adds MOCAP bodies and their geoms to the worldbody."""
@@ -355,14 +361,27 @@ class RobotPlanner:
         # print("IK reached max steps without converging.")
         return self.data.qpos.copy()  # Return best effort
 
+    """
     def detect_collision(self) -> bool:
-        """
-        4. Detects if there are any active collisions using MuJoCo contacts.
-        """
+        #4. Detects if there are any active collisions using MuJoCo contacts.
         # mj_step (or mj_forward which is called inside mj_step) populates data.ncon
         # Check if the number of active contacts is greater than 0
         # print(self.data.ncon)
         return self.data.ncon > 0
+    """
+
+    def detect_collision(self, method="mujoco") -> bool:
+        """Generic entry point for collision checking."""
+        if method == "mujoco":
+            # MuJoCo needs forward kinematics to update contacts
+            mj.mj_forward(self.model, self.data)
+            return self.data.ncon > 0
+        elif method == "fcl":
+            # print("Here")
+            # FCL only needs the forward kinematics for the transforms
+            mj.mj_forward(self.model, self.data)
+            return self.detect_collision_fcl()
+        return False
 
     def get_contacts_info(self):
         """
@@ -686,6 +705,156 @@ class RobotPlanner:
         self.disable_markers()
         mj.mj_forward(self.model, self.data)
 
+    # FCL
+    def _init_fcl(self):
+        """Pre-allocate FCL collision objects for all geoms in the model."""
+        for i in range(self.model.ngeom):
+            # Skip visualization-only geoms if desired (checking geom_group)
+            if self.model.geom_group[i] > 2:
+                continue
+
+            fcl_geom = self.mj_geom_to_fcl(self.model, i)
+            # Create a transform (will be updated every check)
+            transform = fcl.Transform()
+            obj = fcl.CollisionObject(fcl_geom, transform)
+
+            # Store with geom_id so we know which is which
+            self.fcl_objects.append({"obj": obj, "geom_id": i})
+
+    """
+    def detect_collision_fcl(self) -> bool:
+        # Collision detection using FCL.
+        # 1. Update transforms of all FCL objects to match MuJoCo's current data
+        for item in self.fcl_objects:
+            g_id = item["geom_id"]
+            pos = self.data.geom_xpos[g_id]
+            # MuJoCo uses 3x3 matrix, FCL expects it for transform
+            mat = self.data.geom_xmat[g_id].reshape(3, 3)
+
+            item["obj"].setTransform(fcl.Transform(mat, pos))
+
+        # 2. Perform Pairwise Checks
+        # Note: In production, use fcl.DynamicAABBTreeCollisionManager for O(log N)
+        request = fcl.CollisionRequest()
+        result = fcl.CollisionResult()
+
+        for i in range(len(self.fcl_objects)):
+            for j in range(i + 1, len(self.fcl_objects)):
+                # Optional: Skip self-collisions between adjacent robot links
+                # if self._is_adjacent(self.fcl_objects[i]["geom_id"], ...): continue
+
+                ret = fcl.collide(
+                    self.fcl_objects[i]["obj"],
+                    self.fcl_objects[j]["obj"],
+                    request,
+                    result,
+                )
+                if result.is_collision:
+                    return True
+        return False
+    """
+
+    def detect_collision_fcl(self) -> bool:
+        """Collision detection using FCL with MuJoCo-style filtering."""
+        # 1. Update transforms of all FCL objects
+        for item in self.fcl_objects:
+            g_id = item["geom_id"]
+            pos = self.data.geom_xpos[g_id]
+            mat = self.data.geom_xmat[g_id].reshape(3, 3)
+            item["obj"].setTransform(fcl.Transform(mat, pos))
+
+        # 2. Perform Pairwise Checks
+        request = fcl.CollisionRequest()
+        result = fcl.CollisionResult()
+
+        for i in range(len(self.fcl_objects)):
+            for j in range(i + 1, len(self.fcl_objects)):
+                item1 = self.fcl_objects[i]
+                item2 = self.fcl_objects[j]
+
+                id1 = item1["geom_id"]
+                id2 = item2["geom_id"]
+
+                # --- NEW FILTERING LOGIC ---
+
+                # A. Check Bitmasks (contype and conaffinity)
+                # This is the most common way MuJoCo filters collisions
+                type1, aff1 = (
+                    self.model.geom_contype[id1],
+                    self.model.geom_conaffinity[id1],
+                )
+                type2, aff2 = (
+                    self.model.geom_contype[id2],
+                    self.model.geom_conaffinity[id2],
+                )
+
+                if not ((type1 & aff2) or (type2 & aff1)):
+                    continue  # Skip: Bitmasks say they shouldn't collide
+
+                # B. Check Body Hierarchy (Parent/Child)
+                # MuJoCo usually ignores collisions between adjacent links
+                body1 = self.model.geom_bodyid[id1]
+                body2 = self.model.geom_bodyid[id2]
+
+                if body1 == body2:
+                    continue  # Skip: Geoms are on the same body
+
+                # Ignore if body1 is parent of body2 or vice versa
+                if (
+                    self.model.body_parentid[body1] == body2
+                    or self.model.body_parentid[body2] == body1
+                ):
+                    continue  # Skip: Bodies are directly connected (adjacent links)
+
+                # --- PERFORM ACTUAL COLLISION CHECK ---
+                ret = fcl.collide(item1["obj"], item2["obj"], request, result)
+
+                if result.is_collision:
+                    return True
+
+        return False
+
+    def mj_geom_to_fcl(self, model, geom_id):
+        """Converts a MuJoCo geom into an FCL collision geometry."""
+        g_type = model.geom_type[geom_id]
+        size = model.geom_size[geom_id]
+
+        if g_type == mj.mjtGeom.mjGEOM_SPHERE:
+            return fcl.Sphere(size[0])
+        elif g_type == mj.mjtGeom.mjGEOM_BOX:
+            return fcl.Box(size[0], size[1], size[2])
+        elif g_type == mj.mjtGeom.mjGEOM_CYLINDER:
+            return fcl.Cylinder(size[0], size[1])  # Radius, Half-length
+        elif g_type == mj.mjtGeom.mjGEOM_CAPSULE:
+            return fcl.Capsule(size[0], size[1])  # Radius, Half-length
+        elif g_type == mj.mjtGeom.mjGEOM_MESH:
+            # 1. Get the mesh ID associated with this geom
+            mesh_id = self.model.geom_dataid[geom_id]
+
+            # 2. Get the addresses and counts for vertices and faces
+            v_start = self.model.mesh_vertadr[mesh_id]
+            v_num = self.model.mesh_vertnum[mesh_id]
+            f_start = self.model.mesh_faceadr[mesh_id]
+            f_num = self.model.mesh_facenum[mesh_id]
+
+            # 3. Extract vertices and faces
+            # mesh_vert is a flat array of [x, y, z, x, y, z...]
+            vertices = self.model.mesh_vert[v_start : v_start + v_num]
+            # mesh_face is a flat array of [v1, v2, v3, v1, v2, v3...]
+            faces = self.model.mesh_face[f_start : f_start + f_num]
+
+            # 4. Create FCL BVH Model
+            bvh_model = fcl.BVHModel()
+            bvh_model.beginModel(f_num, v_num)
+            bvh_model.addSubModel(vertices, faces)
+            bvh_model.endModel()
+
+            return bvh_model
+        # Note: For mjGEOM_MESH, you'd need to extract vertices from model.mesh_vert
+        raise NotImplementedError(
+            f"Geom type {g_type} not implemented for FCL wrapper."
+        )
+
 
 # ====================================================================
 # OMPL Motion Planning Class
@@ -700,7 +869,7 @@ class MotionPlannerOMPL:
     def __init__(
         self,
         planner_type: str = "RRTConnect",
-        collision_method: str = "mujoco_contacts",
+        collision_method: str = "mujoco",
     ):
         """
         Initializes the OMPL planner structures.
@@ -813,11 +982,18 @@ class MotionPlannerOMPL:
         # 3. Apply state to MuJoCo model
         self.robot.set_joint_positions(q_actuated)
 
+        """
         # 4. Check for collision using the chosen method (default: MuJoCo contacts)
-        if self.collision_method == "mujoco_contacts":
+        if self.collision_method == "mujoco":
             # detect_collision calls mj_forward internally
             if self.robot.detect_collision():
                 return False
+        """
+
+        # Use the specific method passed during init
+        if self.robot.detect_collision(method=self.collision_method):
+            # print("Collision")
+            return False
 
         # State is valid
         return True
