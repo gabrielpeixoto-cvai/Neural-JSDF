@@ -133,7 +133,7 @@ class RobotPlanner:
             obstacle_body = self.spec.worldbody.add_body(
                 name=body_name,
                 pos=positions[i],
-                mocap=True,  # Critical for dynamic positioning via data.mocap_pos
+                # mocap=True,  # Critical for dynamic positioning via data.mocap_pos
             )
 
             # Add a visualization geom to the mocap body
@@ -788,27 +788,54 @@ class RobotPlanner:
                     self.model.geom_conaffinity[id2],
                 )
 
+                """
                 if not ((type1 & aff2) or (type2 & aff1)):
+                    print(
+                        f"Skipping {id1} vs {id2} due to bitmasks: {type1}/{aff1} vs {type2}/{aff2}"
+                    )
                     continue  # Skip: Bitmasks say they shouldn't collide
+                """
+                body1 = self.model.geom_bodyid[id1]
+                body2 = self.model.geom_bodyid[id2]
+                # C. Ignore collisions between two STATIC obstacles
+                # Since both are in Group 2, check if both bodies are children of the world (id 0)
+                # and have no joints (static).
+                if (
+                    self.model.body_parentid[body1] == 0
+                    and self.model.body_parentid[body2] == 0
+                    and self.model.geom_group[id1] == 2
+                    and self.model.geom_group[id2] == 2
+                ):
+                    # This assumes your obstacles are top-level bodies in the worldbody
+                    print(f"Skipping bodies from the same group: {id1}/{id2}")
+                    continue
 
                 # B. Check Body Hierarchy (Parent/Child)
                 # MuJoCo usually ignores collisions between adjacent links
-                body1 = self.model.geom_bodyid[id1]
-                body2 = self.model.geom_bodyid[id2]
 
                 if body1 == body2:
                     continue  # Skip: Geoms are on the same body
-
+                """
                 # Ignore if body1 is parent of body2 or vice versa
                 if (
                     self.model.body_parentid[body1] == body2
                     or self.model.body_parentid[body2] == body1
                 ):
+                    # print(f"Body {body1} is parent of body {body2} or vice-versa")
                     continue  # Skip: Bodies are directly connected (adjacent links)
+                """
 
                 # --- PERFORM ACTUAL COLLISION CHECK ---
                 ret = fcl.collide(item1["obj"], item2["obj"], request, result)
 
+                # if (id1 == 1033) or (id2 == 1033):
+                drequest = fcl.DistanceRequest()
+                dresult = fcl.DistanceResult()
+
+                dret = fcl.distance(item1["obj"], item2["obj"], drequest, dresult)
+                print(
+                    f"Checking collision between object {id1} and {id2} result is {result.is_collision} and ret is {ret} dist {dret}"
+                )
                 if result.is_collision:
                     return True
 
@@ -822,11 +849,11 @@ class RobotPlanner:
         if g_type == mj.mjtGeom.mjGEOM_SPHERE:
             return fcl.Sphere(size[0])
         elif g_type == mj.mjtGeom.mjGEOM_BOX:
-            return fcl.Box(size[0], size[1], size[2])
+            return fcl.Box(size[0] * 2, size[1] * 2, size[2] * 2)
         elif g_type == mj.mjtGeom.mjGEOM_CYLINDER:
-            return fcl.Cylinder(size[0], size[1])  # Radius, Half-length
+            return fcl.Cylinder(size[0], size[1] * 2)  # Radius, Half-length
         elif g_type == mj.mjtGeom.mjGEOM_CAPSULE:
-            return fcl.Capsule(size[0], size[1])  # Radius, Half-length
+            return fcl.Capsule(size[0], size[1] * 2)  # Radius, Half-length
         elif g_type == mj.mjtGeom.mjGEOM_MESH:
             # 1. Get the mesh ID associated with this geom
             mesh_id = self.model.geom_dataid[geom_id]
@@ -850,9 +877,48 @@ class RobotPlanner:
             bvh_model.endModel()
 
             return bvh_model
-        # Note: For mjGEOM_MESH, you'd need to extract vertices from model.mesh_vert
-        raise NotImplementedError(
-            f"Geom type {g_type} not implemented for FCL wrapper."
+        else:
+            # Note: For mjGEOM_MESH, you'd need to extract vertices from model.mesh_vert
+            raise NotImplementedError(
+                f"Geom type {g_type} not implemented for FCL wrapper."
+            )
+
+    def add_dynamic_obstacle(
+        self, name: str, pos: list, size: list, geom_type=mj.mjtGeom.mjGEOM_BOX
+    ):
+        """Adds a new obstacle to the spec and recompiles the entire system."""
+
+        # 1. Add to the MjSpec
+        new_body = self.spec.worldbody.add_body(name=name, pos=pos)
+        new_body.add_geom(
+            name=f"geom_{name}",
+            type=geom_type,
+            size=size,
+            rgba=[1, 0, 0, 1],  # Red for dynamic obstacles
+            group=2,  # Matching your obstacle group
+        )
+
+        # 2. Recompile and refresh
+        self.model = self.spec.compile()
+        self.data = mj.MjData(self.model)
+
+        # 3. CRITICAL: Refresh FCL objects
+        # Clear the old FCL objects and re-allocate based on the new model
+        self.fcl_objects = []
+        self._init_fcl()
+
+        # 4. Refresh IDs (camera, EEF, etc.) as they may have shifted
+        self.eef_site_id = mj_name2id(
+            self.model, mj.mjtObj.mjOBJ_BODY, self.end_effector_site_name
+        )
+        self.camera_id = mj_name2id(
+            self.model, mj.mjtObj.mjOBJ_CAMERA, self.CAMERA_NAME
+        )
+        self.marker_body_ids, self.marker_geom_ids = self._get_marker_ids()
+
+        geom_id = mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, f"geom_{name}")
+        print(
+            f"Object '{name}' with geomid {geom_id} added. Model recompiled with {self.model.ngeom} geoms."
         )
 
 
@@ -992,7 +1058,7 @@ class MotionPlannerOMPL:
 
         # Use the specific method passed during init
         if self.robot.detect_collision(method=self.collision_method):
-            # print("Collision")
+            print("Collision")
             return False
 
         # State is valid

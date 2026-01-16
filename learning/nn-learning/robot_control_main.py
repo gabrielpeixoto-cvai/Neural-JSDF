@@ -119,10 +119,12 @@ def motion_planning_main():
     try:
         # 2. Initialize the Robot Planner
         robot_planner = RobotPlanner(MJCF_FILE, EEF_BODY_NAME)
-
+        robot_planner.add_dynamic_obstacle(
+            name="test", pos=[-0.05, -0.05, 0.35], size=[0.1, 0.1, 0.03]
+        )
         # 3. Initialize the Motion Planner
         motion_planner = MotionPlannerOMPL(
-            planner_type=PLANNER_TYPE, collision_method="fcl"
+            planner_type=PLANNER_TYPE, collision_method="mujoco"
         )
         motion_planner.setup_planner(robot_planner)
         # 4. Setup Off-screen Rendering for Camera
