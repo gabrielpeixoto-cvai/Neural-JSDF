@@ -755,14 +755,15 @@ class RobotPlanner:
             if "obstacle" in geom_name.lower():
                 self.fcl_env_items.append(item)
                 self.env_manager.registerObject(obj)
-                print(f" (Obstacle) Name: {geom_name}")
+                print(f" (Obstacle) Name (id): {geom_name} {i}")
             else:
-                print(f" (Robot) Name: {geom_name}")
+                print(f" (Robot) Name (id): {geom_name} {i}")
                 self.fcl_robot_items.append(item)
                 self.robot_manager.registerObject(obj)
 
         self.robot_manager.setup()
         self.env_manager.setup()
+        self._init_self_collision_pairs()
         print(
             f"FCL Partitioned: {len(self.fcl_robot_items)} Robot geoms, {len(self.fcl_env_items)} Env geoms."
         )
@@ -975,6 +976,53 @@ class RobotPlanner:
         # to ignore adjacent links.
         # self.robot_manager.collide(cdata, self._self_collision_callback)
 
+        # check self collision
+        if self.detect_self_collision():
+            return True
+
+        return False
+
+    def _init_self_collision_pairs(self):
+        self.valid_self_collision_pairs = []
+
+        # Iterate through all combinations of robot geoms
+        for i in range(len(self.fcl_robot_items)):
+            for j in range(i + 1, len(self.fcl_robot_items)):
+                item1 = self.fcl_robot_items[i]
+                item2 = self.fcl_robot_items[j]
+
+                body1 = self.model.geom_bodyid[item1["geom_id"]]
+                body2 = self.model.geom_bodyid[item2["geom_id"]]
+
+                # FILTER LOGIC:
+                # 1. Ignore if they belong to the same body
+                if body1 == body2:
+                    continue
+
+                # 2. Ignore if they are parent/child
+                if (
+                    self.model.body_parentid[body1] == body2
+                    or self.model.body_parentid[body2] == body1
+                ):
+                    continue
+
+                # 3. Add to whitelist
+                self.valid_self_collision_pairs.append((item1, item2))
+
+        print(
+            f"Pre-filtered {len(self.valid_self_collision_pairs)} potential self-collision pairs."
+        )
+
+    def detect_self_collision(self) -> bool:
+        """Pairwise check for the pre-filtered robot links."""
+        req = fcl.CollisionRequest()
+        res = fcl.CollisionResult()
+
+        for item1, item2 in self.valid_self_collision_pairs:
+            # FCL collide returns the number of contacts
+            if fcl.collide(item1["obj"], item2["obj"], req, res) > 0:
+                # Optional: print(f"Self-collision: {item1['name']} with {item2['name']}")
+                return True
         return False
 
 
