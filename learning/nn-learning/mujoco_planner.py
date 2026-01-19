@@ -372,15 +372,16 @@ class RobotPlanner:
 
     def detect_collision(self, method="mujoco") -> bool:
         """Generic entry point for collision checking."""
+        mj.mj_forward(self.model, self.data)
         if method == "mujoco":
             # MuJoCo needs forward kinematics to update contacts
-            mj.mj_forward(self.model, self.data)
             return self.data.ncon > 0
         elif method == "fcl":
             # print("Here")
             # FCL only needs the forward kinematics for the transforms
-            mj.mj_forward(self.model, self.data)
             return self.detect_collision_fcl()
+        elif method == "fcl-fast":
+            return self.detect_collision_fcl_fast()
         return False
 
     def get_contacts_info(self):
@@ -706,8 +707,9 @@ class RobotPlanner:
         mj.mj_forward(self.model, self.data)
 
     # FCL
+    """
     def _init_fcl(self):
-        """Pre-allocate FCL collision objects for all geoms in the model."""
+        #Pre-allocate FCL collision objects for all geoms in the model.
         for i in range(self.model.ngeom):
             # Skip visualization-only geoms if desired (checking geom_group)
             if self.model.geom_group[i] > 2:
@@ -720,39 +722,50 @@ class RobotPlanner:
 
             # Store with geom_id so we know which is which
             self.fcl_objects.append({"obj": obj, "geom_id": i})
-
     """
-    def detect_collision_fcl(self) -> bool:
-        # Collision detection using FCL.
-        # 1. Update transforms of all FCL objects to match MuJoCo's current data
-        for item in self.fcl_objects:
-            g_id = item["geom_id"]
-            pos = self.data.geom_xpos[g_id]
-            # MuJoCo uses 3x3 matrix, FCL expects it for transform
-            mat = self.data.geom_xmat[g_id].reshape(3, 3)
 
-            item["obj"].setTransform(fcl.Transform(mat, pos))
+    def _init_fcl(self):
+        """Pre-allocate FCL collision objects and initialize the manager."""
+        self.fcl_objects = []
+        # Two Broadphase Managers
+        self.robot_manager = fcl.DynamicAABBTreeCollisionManager()
+        self.env_manager = fcl.DynamicAABBTreeCollisionManager()
 
-        # 2. Perform Pairwise Checks
-        # Note: In production, use fcl.DynamicAABBTreeCollisionManager for O(log N)
-        request = fcl.CollisionRequest()
-        result = fcl.CollisionResult()
+        # Track items in separate lists for efficient transform updates
+        self.fcl_robot_items = []
+        self.fcl_env_items = []
 
-        for i in range(len(self.fcl_objects)):
-            for j in range(i + 1, len(self.fcl_objects)):
-                # Optional: Skip self-collisions between adjacent robot links
-                # if self._is_adjacent(self.fcl_objects[i]["geom_id"], ...): continue
+        for i in range(self.model.ngeom):
+            if self.model.geom_group[i] > 2:
+                continue
 
-                ret = fcl.collide(
-                    self.fcl_objects[i]["obj"],
-                    self.fcl_objects[j]["obj"],
-                    request,
-                    result,
-                )
-                if result.is_collision:
-                    return True
-        return False
-    """
+            geom_name = mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_GEOM, i) or ""
+            fcl_geom = self.mj_geom_to_fcl(self.model, i)
+            transform = fcl.Transform()
+            obj = fcl.CollisionObject(fcl_geom, transform)
+
+            # Store metadata in the 'user_data' if your FCL binding supports it,
+            # otherwise we track it via a dictionary
+            item = {"obj": obj, "geom_id": i, "name": geom_name}
+            self.fcl_objects.append(item)
+
+            # Partitioning Logic:
+            # 1. Use Group 2 (assigned in _add_obstacles_to_spec and add_dynamic_obstacle)
+            # 2. Backup: Check if "obstacle" is in the name
+            if "obstacle" in geom_name.lower():
+                self.fcl_env_items.append(item)
+                self.env_manager.registerObject(obj)
+                print(f" (Obstacle) Name: {geom_name}")
+            else:
+                print(f" (Robot) Name: {geom_name}")
+                self.fcl_robot_items.append(item)
+                self.robot_manager.registerObject(obj)
+
+        self.robot_manager.setup()
+        self.env_manager.setup()
+        print(
+            f"FCL Partitioned: {len(self.fcl_robot_items)} Robot geoms, {len(self.fcl_env_items)} Env geoms."
+        )
 
     def detect_collision_fcl(self) -> bool:
         """Collision detection using FCL with MuJoCo-style filtering."""
@@ -807,7 +820,7 @@ class RobotPlanner:
                     and self.model.geom_group[id2] == 2
                 ):
                     # This assumes your obstacles are top-level bodies in the worldbody
-                    print(f"Skipping bodies from the same group: {id1}/{id2}")
+                    # print(f"Skipping bodies from the same group: {id1}/{id2}")
                     continue
 
                 # B. Check Body Hierarchy (Parent/Child)
@@ -815,7 +828,7 @@ class RobotPlanner:
 
                 if body1 == body2:
                     continue  # Skip: Geoms are on the same body
-                """
+
                 # Ignore if body1 is parent of body2 or vice versa
                 if (
                     self.model.body_parentid[body1] == body2
@@ -823,7 +836,6 @@ class RobotPlanner:
                 ):
                     # print(f"Body {body1} is parent of body {body2} or vice-versa")
                     continue  # Skip: Bodies are directly connected (adjacent links)
-                """
 
                 # --- PERFORM ACTUAL COLLISION CHECK ---
                 ret = fcl.collide(item1["obj"], item2["obj"], request, result)
@@ -833,9 +845,9 @@ class RobotPlanner:
                 dresult = fcl.DistanceResult()
 
                 dret = fcl.distance(item1["obj"], item2["obj"], drequest, dresult)
-                print(
-                    f"Checking collision between object {id1} and {id2} result is {result.is_collision} and ret is {ret} dist {dret}"
-                )
+                # print(
+                #    f"Checking collision between object {id1} and {id2} result is {result.is_collision} and ret is {ret} dist {dret}"
+                # )
                 if result.is_collision:
                     return True
 
@@ -921,6 +933,50 @@ class RobotPlanner:
             f"Object '{name}' with geomid {geom_id} added. Model recompiled with {self.model.ngeom} geoms."
         )
 
+    def detect_collision_fcl_fast(self) -> bool:
+        """Many-to-Many collision detection between Robot and Environment Managers."""
+
+        # 1. Update Robot Transforms
+        for item in self.fcl_robot_items:
+            g_id = item["geom_id"]
+            obj = item["obj"]
+            obj.setTransform(
+                fcl.Transform(
+                    self.data.geom_xmat[g_id].reshape(3, 3), self.data.geom_xpos[g_id]
+                )
+            )
+            self.robot_manager.update(obj)
+        self.robot_manager.update()
+
+        # 2. Update Environment Transforms (Required because of your mocap/dynamic obstacles)
+        for item in self.fcl_env_items:
+            g_id = item["geom_id"]
+            obj = item["obj"]
+            obj.setTransform(
+                fcl.Transform(
+                    self.data.geom_xmat[g_id].reshape(3, 3), self.data.geom_xpos[g_id]
+                )
+            )
+            self.env_manager.update(obj)
+        self.env_manager.update()
+
+        # 3. Managed Many-to-Many Check
+        # Using fcl.defaultCollisionCallback avoids the Python identity/hash overhead
+        cdata = fcl.CollisionData()
+        self.robot_manager.collide(
+            self.env_manager, cdata, fcl.defaultCollisionCallback
+        )
+
+        if cdata.result.is_collision:
+            return True
+
+        # 4. Optional: Self-Collision
+        # If the robot can hit itself, you need a separate check WITH a filtering callback
+        # to ignore adjacent links.
+        # self.robot_manager.collide(cdata, self._self_collision_callback)
+
+        return False
+
 
 # ====================================================================
 # OMPL Motion Planning Class
@@ -952,6 +1008,7 @@ class MotionPlannerOMPL:
         self.collision_method = collision_method
         self.planner_initialized = False
         self.dofs = 0
+        self.collison_check_times = []
 
     def setup_planner(self, robot_planner: RobotPlanner):
         """Initializes OMPL structures using the given RobotPlanner instance."""
@@ -1057,9 +1114,14 @@ class MotionPlannerOMPL:
         """
 
         # Use the specific method passed during init
+        start = time.perf_counter()
         if self.robot.detect_collision(method=self.collision_method):
-            print("Collision")
+            # print("Collision")
+            end = time.perf_counter()
+            self.collison_check_times.append(end - start)
             return False
+        end = time.perf_counter()
+        self.collison_check_times.append(end - start)
 
         # State is valid
         return True
@@ -1071,6 +1133,7 @@ class MotionPlannerOMPL:
         target_quat: np.ndarray,
         planning_time: float = 5.0,
     ) -> bool:
+        self.collison_check_times = []
         """
         Plans a path from a Cartesian start to a Cartesian goal using OMPL.
         """
@@ -1148,6 +1211,9 @@ class MotionPlannerOMPL:
             self.trajectory_buffer = np.array(trajectory)
             print(
                 f"Path simplified and extracted: {len(self.trajectory_buffer)} steps."
+            )
+            print(
+                f"Collision checking per step mean time: {sum(self.collison_check_times)/len(self.collison_check_times)} s max: {max(self.collison_check_times)} min: {min(self.collison_check_times)}"
             )
             return True
         else:
