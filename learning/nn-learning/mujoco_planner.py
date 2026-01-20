@@ -36,10 +36,13 @@ class RobotPlanner:
         # Load MJCF into MjSpec for programmatic editing
         self.spec = MjSpec.from_file(mjcf_path)
         self.end_effector_site_name = end_effector_site_name
+        self.spec.visual.map.znear = 0.01
+        self.spec.visual.map.zfar = 10.0
 
         self._add_viz_geoms_to_spec()
         self._add_camera_to_spec()
         self._add_obstacles_to_spec()
+        self._add_checkerboard_plane()
 
         # Compile the spec into mjModel and create MjData
         self.model = self.spec.compile()
@@ -96,6 +99,38 @@ class RobotPlanner:
         # New FCL initialization
         self.fcl_objects = []
         self._init_fcl()
+
+    def _add_checkerboard_plane(self):
+        # 1. Add the checkerboard texture
+        # '2d' type with 'checker' built-in pattern
+        tex = self.spec.add_texture(
+            name="grid_tex",
+            type=mj.mjtTexture.mjTEXTURE_2D,
+            builtin=mj.mjtBuiltin.mjBUILTIN_CHECKER,
+            rgb1=[0.2, 0.3, 0.4],
+            rgb2=[0.1, 0.2, 0.3],
+            width=300,
+            height=300,
+            mark=mj.mjtMark.mjMARK_EDGE,
+            markrgb=[0.8, 0.8, 0.8],
+        )
+
+        # 2. Add the material that uses the texture
+        mat = self.spec.add_material(
+            name="grid_mat",
+            textures=["grid_tex"],
+            texrepeat=[5, 5],  # How many times the pattern repeats
+            reflectance=0.2,
+        )
+
+        # 3. Add the geom to the worldbody
+        self.spec.worldbody.add_geom(
+            name="floor_plane",
+            type=mj.mjtGeom.mjGEOM_PLANE,
+            pos=[0, 0, -0.5],
+            size=[1, 1, 1],
+            material="grid_mat",
+        )
 
     def _add_viz_geoms_to_spec(self):
         """Programmatically adds MOCAP bodies and their geoms to the worldbody."""
@@ -158,10 +193,10 @@ class RobotPlanner:
         if eef_body_spec:
             eef_body_spec.add_camera(
                 name=self.CAMERA_NAME,
-                pos=[0, 0, 0.05],
+                pos=[0, 0.1, 0.05],
                 # Default MuJoCo camera alignment
-                xyaxes=[1, 0, 0, 0, 0, -1],
-                fovy=60,
+                xyaxes=[1, 0, 0, 0, 0, 1],
+                fovy=90,
                 # mode=mj.mjtCamera,  # Camera pose is fixed relative to the body
             )
             print(
@@ -276,7 +311,7 @@ class RobotPlanner:
         self,
         target_pos: np.ndarray,
         target_quat: np.ndarray,
-        max_steps: int = 100,
+        max_steps: int = 1000,
         tolerance: float = 1e-3,
         damping: float = 1e-1,
     ) -> np.ndarray:
@@ -318,6 +353,7 @@ class RobotPlanner:
             # target_mat = mj.mju_quat2Mat(target_quat)
             # Rotation error vector (3-element): R_eef * (R_eef_T * R_target)_skew_inv
             # MuJoCo has a helper for the error:
+            """
             rot_error = np.zeros(3)
             # mj.mju_quatDiff(self.data.xquat[self.eef_site_id], target_quat, rot_error)
             mj.mju_subQuat(
@@ -325,6 +361,23 @@ class RobotPlanner:
                 target_quat,  # qa (Target quaternion)
                 self.data.xquat[self.eef_site_id],  # qb (Current quaternion)
             )
+            """
+            rot_error = np.zeros(3)
+            neg_quat = np.zeros(4)
+            err_rot_quat = np.zeros(4)
+            # 2. Orientation Error (Proper Quaternion Delta)
+            # Formula: Error = Target * inv(Current)
+            current_quat = self.data.xquat[self.eef_site_id]
+
+            # Calculate inverse (conjugate) of current quaternion
+            mj.mju_negQuat(neg_quat, current_quat)
+
+            # Calculate the relative rotation quaternion
+            mj.mju_mulQuat(err_rot_quat, target_quat, neg_quat)
+
+            # Convert the 4D relative quaternion to a 3D rotation velocity vector
+            # The [1:] slice extracts the (x, y, z) components which work as an axis-angle error
+            rot_error = err_rot_quat[1:]
 
             # Combined pose error (6-element)
             pose_error = np.hstack([pos_error, rot_error])
@@ -441,6 +494,7 @@ class RobotPlanner:
 
                 # 1. Manually update the data.time (required by some visualization features)
                 # We use the model's timestep to ensure consistency.
+                viewer.opt.frame = mujoco.mjtFrame.mjFRAME_BODY
                 self.data.time += timestep
                 current_time += timestep
 
@@ -499,10 +553,11 @@ class RobotPlanner:
 
     def render_rgbd(self) -> tuple[np.ndarray, np.ndarray]:
         self.renderer.update_scene(self.data, camera=self.camera_id)
+        self.renderer.disable_depth_rendering()
+        rgb = self.renderer.render()
         self.renderer.enable_depth_rendering()
         depth = self.renderer.render()
         self.renderer.disable_depth_rendering()
-        rgb = self.renderer.render()
         return rgb, depth
 
     def rgbd_to_pointcloud(
@@ -740,6 +795,10 @@ class RobotPlanner:
                 continue
 
             geom_name = mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_GEOM, i) or ""
+
+            if "plane" in geom_name.lower():
+                continue
+
             fcl_geom = self.mj_geom_to_fcl(self.model, i)
             transform = fcl.Transform()
             obj = fcl.CollisionObject(fcl_geom, transform)
@@ -755,9 +814,9 @@ class RobotPlanner:
             if "obstacle" in geom_name.lower():
                 self.fcl_env_items.append(item)
                 self.env_manager.registerObject(obj)
-                print(f" (Obstacle) Name (id): {geom_name} {i}")
+                # print(f" (Obstacle) Name (id): {geom_name} {i}")
             else:
-                print(f" (Robot) Name (id): {geom_name} {i}")
+                # print(f" (Robot) Name (id): {geom_name} {i}")
                 self.fcl_robot_items.append(item)
                 self.robot_manager.registerObject(obj)
 
@@ -897,7 +956,12 @@ class RobotPlanner:
             )
 
     def add_dynamic_obstacle(
-        self, name: str, pos: list, size: list, geom_type=mj.mjtGeom.mjGEOM_BOX
+        self,
+        name: str,
+        pos: list,
+        size: list,
+        geom_type=mj.mjtGeom.mjGEOM_BOX,
+        color=[1, 0, 0, 1],
     ):
         """Adds a new obstacle to the spec and recompiles the entire system."""
 
@@ -907,13 +971,22 @@ class RobotPlanner:
             name=f"geom_{name}",
             type=geom_type,
             size=size,
-            rgba=[1, 0, 0, 1],  # Red for dynamic obstacles
+            rgba=color,  # Red for dynamic obstacles
             group=2,  # Matching your obstacle group
         )
 
         # 2. Recompile and refresh
         self.model = self.spec.compile()
         self.data = mj.MjData(self.model)
+        # 2. Refresh the Renderer!
+        if self.renderer is not None:
+            width, height = self.renderer.width, self.renderer.height
+            self.renderer = mj.Renderer(self.model, height=height, width=width)
+
+        # 3. Re-get the Camera ID
+        self.camera_id = mj_name2id(
+            self.model, mj.mjtObj.mjOBJ_CAMERA, self.CAMERA_NAME
+        )
 
         # 3. CRITICAL: Refresh FCL objects
         # Clear the old FCL objects and re-allocate based on the new model
@@ -1188,6 +1261,10 @@ class MotionPlannerOMPL:
         if not self.planner_initialized:
             print("Error: Planner not initialized. Call setup_planner first.")
             return False
+        # 1. Clear previous planning data
+        self.pdef.clearSolutionPaths()
+        self.pdef.clearStartStates()
+        self.planner.clear()
 
         self.trajectory_buffer = None
         print("\n--- Phase 1: Finding Start/Goal Joint Angles via IK ---")
